@@ -142,45 +142,39 @@ Defines: - Header structures\
 
 ------------------------------------------------------------------------
 
-## Tools Provided
+SignMedia CLI tool
+
+Usage: signmedia <COMMAND>
+
+Commands:
+  gen-key  Generate a new Ed25519 keypair
+  sign     Sign a media file and create a .smed container
+  verify   Verify a .smed file
+  clip     Create a clip from a .smed file
+  help     Print this message or the help of the given subcommand(s)
+
+Options:
+  -h, --help  Print help
 
 SignMedia includes these CLI utilities:
 
-### `smed-sign-original`
+## CLI usage
 
-Creates a signed manifest (`*.sigmanifest`) for original media.
+Build the CLI:
 
-Steps: 1. Extract tracks\
-2. Chunk them\
-3. Build Merkle roots\
-4. Generate OWD\
-5. Sign the OWD\
-6. Output `.smed` file or paired manifest
+```bash
+cargo build --release
+```
 
-------------------------------------------------------------------------
+Generate a keypair (private key file + prints public key):
 
-### `smed-verify-original`
+```bash
+cargo run -- gen-key --output key.priv
+```
 
-Recomputes hashes & verifies signatures.
+Sign a file and create a `.smed` container:
 
-------------------------------------------------------------------------
-
-### `smed-create-clip`
-
-Generates derivative media:
-
--   Extracts chunk-ranges\
--   Builds Merkle proofs\
--   Creates DWD\
--   Signs the DWD\
--   Writes new `.smed` clip
-
-------------------------------------------------------------------------
-
-### `smed-verify-clip`
-
-Verifies both: - Clip integrity\
-- Provenance chain back to root author
+```bash
 
 ------------------------------------------------------------------------
 
