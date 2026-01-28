@@ -1,8 +1,12 @@
 # SignMedia: Cryptographically Verifiable Media Codec & Provenance Container
 
-## Donations
--   XMR: 87wqyoRwNdJaCpR9gvXwuQaBYAJtuytEw9NV8Rz2j31AJfhqkjxSSkogRLgB7zKcoDbwE2MAY9MdNZKNQRWmkNRJPNz2qXD
+<div align="center">
 
+## Donations
+**XMR:**
+87wqyoRwNdJaCpR9gvXwuQaBYAJtuytEw9NV8Rz2j31AJfhqkjxSSkogRLgB7zKcoDbwE2MAY9MdNZKNQRWmkNRJPNz2qXD
+
+</div>
 ## Overview
 
 **SignMedia** is a next-generation media container and provenance
