@@ -26,6 +26,16 @@ pub struct TrackMetadata {
     pub perceptual_hash: Option<String>, // Hex encoded
     pub total_chunks: u64,
     pub chunk_size: u64,
+    #[serde(default)]
+    pub chunk_index: Vec<TrackChunkIndexEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TrackChunkIndexEntry {
+    pub chunk_index: u64,
+    pub pts: Option<i64>,
+    pub offset: u64,
+    pub size: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

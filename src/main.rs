@@ -2,9 +2,11 @@ use anyhow::{anyhow, Context, Result};
 use chrono::Utc;
 use clap::{Parser, Subcommand};
 use ed25519_dalek::{Signature, SigningKey, VerifyingKey};
-use signmedia::container::{SmedReader, SmedWriter};
+use signmedia::container::{ChunkTableEntry, SmedReader, SmedWriter, TrackTableEntry};
 use signmedia::crypto::{self, MerkleTree};
-use signmedia::models::{ManifestContent, OriginalWorkDescriptor, SignedManifest, TrackMetadata};
+use signmedia::models::{
+    ManifestContent, OriginalWorkDescriptor, SignedManifest, TrackChunkIndexEntry, TrackMetadata,
+};
 use std::fs;
 use std::io::{BufReader, Read};
 use std::path::PathBuf;
@@ -40,7 +42,7 @@ enum Commands {
         /// Title of the work
         #[arg(short, long, default_value = "Untitled")]
         title: String,
-        /// Chunk size in bytes
+        /// Maximum chunk size in bytes (used as a cap for packet-based chunking)
         #[arg(short, long, default_value_t = 1048576)] // 1MB
         chunk_size: u64,
     },
@@ -174,7 +176,7 @@ fn sign_command(
     key_path: PathBuf,
     output: PathBuf,
     title: String,
-    chunk_size: u64,
+    max_chunk_size: u64,
 ) -> Result<()> {
     let key_bytes = fs::read(key_path).context("Failed to read key file")?;
     let key_array: [u8; 32] = key_bytes
@@ -188,19 +190,33 @@ fn sign_command(
     let mut chunks = Vec::new();
     let mut chunk_hashes = Vec::new();
     let mut first_chunk_data = None;
-
-    loop {
-        let mut buffer = vec![0u8; chunk_size as usize];
-        let n = reader.read(&mut buffer)?;
-        if n == 0 {
-            break;
-        }
-        buffer.truncate(n);
+    let chunked = chunk_media(&mut reader, max_chunk_size)?;
+    let mut chunk_index = Vec::with_capacity(chunked.len());
+    let mut chunk_table = Vec::with_capacity(chunked.len());
+    let mut offset = 0u64;
+    for (index, chunk) in chunked.into_iter().enumerate() {
+        let size = chunk.data.len() as u64;
         if first_chunk_data.is_none() {
-            first_chunk_data = Some(buffer.clone());
+            first_chunk_data = Some(chunk.data.clone());
         }
-        chunk_hashes.push(crypto::hash_data(&buffer));
-        chunks.push(buffer);
+        chunk_hashes.push(crypto::hash_data(&chunk.data));
+        chunk_index.push(TrackChunkIndexEntry {
+            chunk_index: index as u64,
+            pts: chunk.pts,
+            offset,
+            size,
+        });
+        chunk_table.push(ChunkTableEntry {
+            track_id: 0,
+            chunk: TrackChunkIndexEntry {
+                chunk_index: index as u64,
+                pts: chunk.pts,
+                offset,
+                size,
+            },
+        });
+        offset += size;
+        chunks.push(chunk.data);
     }
 
     let tree = MerkleTree::new(chunk_hashes);
@@ -223,7 +239,8 @@ fn sign_command(
             merkle_root: hex::encode(root),
             perceptual_hash: p_hash,
             total_chunks: chunks.len() as u64,
-            chunk_size,
+            chunk_size: max_chunk_size,
+            chunk_index,
         }],
     };
 
@@ -242,7 +259,14 @@ fn sign_command(
 
     let out_file = fs::File::create(&output).context("Failed to create output file")?;
     let mut writer = SmedWriter::new(out_file);
-    writer.write_all(&manifest, &chunks)?;
+    let track_table = vec![TrackTableEntry {
+        track_id: 0,
+        codec: "raw".to_string(),
+        total_chunks: chunks.len() as u64,
+        chunk_size: max_chunk_size,
+        chunk_index_count: chunks.len() as u64,
+    }];
+    writer.write_all(&manifest, &track_table, &chunk_table, &chunks)?;
 
     println!("Successfully signed and saved to {:?}", output);
     Ok(())
@@ -279,15 +303,28 @@ fn verify_command(input: PathBuf) -> Result<()> {
                 let mut chunk_hashes = Vec::new();
                 // For v1, we assume sequential storage of tracks.
                 // Since there's only one track, it's easy.
-                let data_size = file_len - reader.data_start();
-                for i in 0..track.total_chunks {
-                    let offset = i * track.chunk_size;
-                    let size = if offset + track.chunk_size > data_size {
-                        data_size - offset
-                    } else {
-                        track.chunk_size
-                    };
-                    let chunk = reader.read_variable_chunk(offset, size)?;
+                let mut entries = track.chunk_index.clone();
+                if entries.is_empty() {
+                    let data_size = file_len - reader.data_start();
+                    for i in 0..track.total_chunks {
+                        let offset = i * track.chunk_size;
+                        let size = if offset + track.chunk_size > data_size {
+                            data_size - offset
+                        } else {
+                            track.chunk_size
+                        };
+                        entries.push(TrackChunkIndexEntry {
+                            chunk_index: i,
+                            pts: None,
+                            offset,
+                            size,
+                        });
+                    }
+                } else {
+                    entries.sort_by_key(|entry| entry.chunk_index);
+                }
+                for entry in entries {
+                    let chunk = reader.read_variable_chunk(entry.offset, entry.size)?;
                     chunk_hashes.push(crypto::hash_data(&chunk));
                 }
                 let tree = MerkleTree::new(chunk_hashes);
@@ -351,14 +388,51 @@ fn verify_command(input: PathBuf) -> Result<()> {
                 .map_err(|_| anyhow!("Invalid original root"))?;
 
             let mut current_offset = 0;
+            let mut consumed_bytes = 0u64;
             for mapping in &dwd.clip_mappings {
+                let chunk_lookup = reader
+                    .chunk_index_for_track(mapping.track_id)
+                    .map(|entries| {
+                        let mut lookup = std::collections::HashMap::new();
+                        for entry in entries {
+                            lookup.insert(entry.chunk_index, entry);
+                        }
+                        lookup
+                    });
                 println!(
                     "Verifying clip mapping for track {} (chunks {} to {})...",
                     mapping.track_id, mapping.start_chunk_index, mapping.end_chunk_index
                 );
 
                 for proof in &mapping.proofs {
-                    let chunk = reader.read_variable_chunk(current_offset, proof.chunk_size)?;
+                    let chunk_size = if let Some(lookup) = &chunk_lookup {
+                        let entry = lookup
+                            .get(&proof.chunk_index)
+                            .context("Missing chunk index entry for proof")?;
+                        let chunk = reader.read_variable_chunk(entry.offset, entry.size)?;
+                        let size = entry.size;
+                        let actual_hash = crypto::hash_data(&chunk);
+                        if hex::encode(actual_hash) != proof.hash {
+                            return Err(anyhow!(
+                                "Integrity mismatch for chunk {}",
+                                proof.chunk_index
+                            ));
+                        }
+
+                        if !crypto::verify_proof(original_root, proof) {
+                            return Err(anyhow!(
+                                "Merkle proof verification failed for chunk {}",
+                                proof.chunk_index
+                            ));
+                        }
+                        current_offset += size;
+                        consumed_bytes += size;
+                        continue;
+                    } else {
+                        proof.chunk_size
+                    };
+
+                    let chunk = reader.read_variable_chunk(current_offset, chunk_size)?;
                     let actual_hash = crypto::hash_data(&chunk);
                     if hex::encode(actual_hash) != proof.hash {
                         return Err(anyhow!(
@@ -373,10 +447,11 @@ fn verify_command(input: PathBuf) -> Result<()> {
                             proof.chunk_index
                         ));
                     }
-                    current_offset += proof.chunk_size;
+                    current_offset += chunk_size;
+                    consumed_bytes += chunk_size;
                 }
             }
-            if reader.data_start() + current_offset != file_len {
+            if reader.data_start() + consumed_bytes != file_len {
                 return Err(anyhow!("Extra data found at the end of the file"));
             }
             println!("Derivative provenance and integrity verified successfully.");
@@ -430,9 +505,14 @@ fn clip_command(
             }
         };
 
-    let (track_id, total_chunks, chunk_size_orig) = {
+    let (track_id, total_chunks, chunk_size_orig, track_index) = {
         let track = &original_owd.tracks[0];
-        (track.track_id, track.total_chunks, track.chunk_size)
+        (
+            track.track_id,
+            track.total_chunks,
+            track.chunk_size,
+            track.chunk_index.clone(),
+        )
     };
 
     let mut clip_chunks = Vec::new();
@@ -446,20 +526,43 @@ fn clip_command(
         }
         let data_size = file_len - reader.data_start();
         let mut current_offset = 0;
+        let chunk_lookup = reader
+            .chunk_index_for_track(mapping.track_id)
+            .map(|entries| {
+                let mut lookup = std::collections::HashMap::new();
+                for entry in entries {
+                    lookup.insert(entry.chunk_index, entry);
+                }
+                lookup
+            });
         for (index, proof) in existing_proofs.iter().enumerate() {
             let proof_index = index as u64;
-            let size = proof.chunk_size;
-            if current_offset + size > data_size {
-                return Err(anyhow!(
-                    "Unexpected end of data while reading derivative chunks"
-                ));
-            }
             if proof_index >= start && proof_index < end {
-                let chunk = reader.read_variable_chunk(current_offset, size)?;
+                let chunk = if let Some(lookup) = &chunk_lookup {
+                    let entry = lookup
+                        .get(&proof.chunk_index)
+                        .context("Missing chunk index entry for proof")?;
+                    if entry.offset + entry.size > data_size {
+                        return Err(anyhow!(
+                            "Unexpected end of data while reading derivative chunks"
+                        ));
+                    }
+                    reader.read_variable_chunk(entry.offset, entry.size)?
+                } else {
+                    let size = proof.chunk_size;
+                    if current_offset + size > data_size {
+                        return Err(anyhow!(
+                            "Unexpected end of data while reading derivative chunks"
+                        ));
+                    }
+                    reader.read_variable_chunk(current_offset, size)?
+                };
                 clip_chunks.push(chunk);
                 proofs.push(proof.clone());
             }
-            current_offset += size;
+            if chunk_lookup.is_none() {
+                current_offset += proof.chunk_size;
+            }
         }
         if proofs.is_empty() {
             return Err(anyhow!("No chunks selected for derivative clip"));
@@ -501,9 +604,11 @@ fn clip_command(
             }],
         };
 
+        let (track_table, chunk_table) =
+            build_track_tables(mapping.track_id, &proofs, &clip_chunks)?;
         let out_file = fs::File::create(&output)?;
         let mut writer = SmedWriter::new(out_file);
-        writer.write_all(&manifest, &clip_chunks)?;
+        writer.write_all(&manifest, &track_table, &chunk_table, &clip_chunks)?;
 
         println!("Successfully created clip: {:?}", output);
         return Ok(());
@@ -518,30 +623,43 @@ fn clip_command(
 
     println!("Extracting original chunks and reconstructing Merkle tree...");
     let mut original_hashes = Vec::new();
-    let data_size = file_len - reader.data_start();
-    for i in 0..total_chunks {
-        let offset = i * chunk_size_orig;
-        let size = if offset + chunk_size_orig > data_size {
-            data_size - offset
-        } else {
-            chunk_size_orig
-        };
-        let chunk = reader.read_variable_chunk(offset, size)?;
+    let entries = if track_index.is_empty() {
+        let data_size = file_len - reader.data_start();
+        (0..total_chunks)
+            .map(|i| {
+                let offset = i * chunk_size_orig;
+                let size = if offset + chunk_size_orig > data_size {
+                    data_size - offset
+                } else {
+                    chunk_size_orig
+                };
+                TrackChunkIndexEntry {
+                    chunk_index: i,
+                    pts: None,
+                    offset,
+                    size,
+                }
+            })
+            .collect::<Vec<_>>()
+    } else {
+        let mut entries = track_index;
+        entries.sort_by_key(|entry| entry.chunk_index);
+        entries
+    };
+    for entry in &entries {
+        let chunk = reader.read_variable_chunk(entry.offset, entry.size)?;
         original_hashes.push(crypto::hash_data(&chunk));
     }
     let original_tree = MerkleTree::new(original_hashes);
 
-    for i in start..end {
-        let offset = i * chunk_size_orig;
-        let size = if offset + chunk_size_orig > data_size {
-            data_size - offset
-        } else {
-            chunk_size_orig
-        };
-        let chunk = reader.read_variable_chunk(offset, size)?;
+    for entry in entries
+        .iter()
+        .filter(|entry| entry.chunk_index >= start && entry.chunk_index < end)
+    {
+        let chunk = reader.read_variable_chunk(entry.offset, entry.size)?;
         clip_chunks.push(chunk);
-        let mut proof = original_tree.generate_proof(i as usize);
-        proof.chunk_size = size;
+        let mut proof = original_tree.generate_proof(entry.chunk_index as usize);
+        proof.chunk_size = entry.size;
         proofs.push(proof);
     }
 
@@ -572,10 +690,226 @@ fn clip_command(
         }],
     };
 
+    let (track_table, chunk_table) = build_track_tables(track_id, &proofs, &clip_chunks)?;
     let out_file = fs::File::create(&output)?;
     let mut writer = SmedWriter::new(out_file);
-    writer.write_all(&manifest, &clip_chunks)?;
+    writer.write_all(&manifest, &track_table, &chunk_table, &clip_chunks)?;
 
     println!("Successfully created clip: {:?}", output);
     Ok(())
+}
+
+struct ChunkWithMeta {
+    data: Vec<u8>,
+    pts: Option<i64>,
+}
+
+fn chunk_media(reader: &mut impl Read, max_chunk_size: u64) -> Result<Vec<ChunkWithMeta>> {
+    let mut data = Vec::new();
+    reader.read_to_end(&mut data)?;
+    if let Some(frames) = parse_adts_frames(&data) {
+        return Ok(group_adts_frames(&data, &frames, max_chunk_size));
+    }
+    if let Some(nals) = parse_annexb_nals(&data) {
+        return Ok(group_nals(&data, &nals, max_chunk_size));
+    }
+    Ok(fallback_chunking(&data, max_chunk_size))
+}
+
+fn parse_adts_frames(data: &[u8]) -> Option<Vec<(usize, usize, i64)>> {
+    let sample_rates = [
+        96000, 88200, 64000, 48000, 44100, 32000, 24000, 22050, 16000, 12000, 11025, 8000, 7350,
+    ];
+    let mut frames = Vec::new();
+    let mut offset = 0usize;
+    let mut pts_us = 0i64;
+    let mut sample_rate = None;
+    while offset + 7 <= data.len() {
+        if data[offset] != 0xFF || (data[offset + 1] & 0xF0) != 0xF0 {
+            return None;
+        }
+        let protection_absent = data[offset + 1] & 0x01;
+        let header_len = if protection_absent == 1 { 7 } else { 9 };
+        let frame_length = (((data[offset + 3] & 0x03) as usize) << 11)
+            | ((data[offset + 4] as usize) << 3)
+            | ((data[offset + 5] & 0xE0) as usize >> 5);
+        if frame_length < header_len || offset + frame_length > data.len() {
+            return None;
+        }
+        let sample_rate_index = ((data[offset + 2] & 0x3C) >> 2) as usize;
+        let sr = sample_rates.get(sample_rate_index).copied()?;
+        sample_rate.get_or_insert(sr);
+        if sample_rate != Some(sr) {
+            return None;
+        }
+        frames.push((offset, frame_length, pts_us));
+        pts_us += (1_000_000i64 * 1024) / sr as i64;
+        offset += frame_length;
+    }
+    if offset != data.len() || frames.is_empty() {
+        None
+    } else {
+        Some(frames)
+    }
+}
+
+fn group_adts_frames(
+    data: &[u8],
+    frames: &[(usize, usize, i64)],
+    max_chunk_size: u64,
+) -> Vec<ChunkWithMeta> {
+    let mut chunks = Vec::new();
+    let mut current = Vec::new();
+    let mut current_pts = None;
+    for (start, length, pts) in frames {
+        if !current.is_empty() && current.len() as u64 + *length as u64 > max_chunk_size {
+            chunks.push(ChunkWithMeta {
+                data: std::mem::take(&mut current),
+                pts: current_pts,
+            });
+            current_pts = None;
+        }
+        if current.is_empty() {
+            current_pts = Some(*pts);
+        }
+        current.extend_from_slice(&data[*start..start + length]);
+    }
+    if !current.is_empty() {
+        chunks.push(ChunkWithMeta {
+            data: current,
+            pts: current_pts,
+        });
+    }
+    chunks
+}
+
+fn parse_annexb_nals(data: &[u8]) -> Option<Vec<(usize, usize, bool)>> {
+    let mut starts = Vec::new();
+    let mut i = 0usize;
+    while i + 3 <= data.len() {
+        if data[i] == 0 && data[i + 1] == 0 && data[i + 2] == 1 {
+            starts.push((i, 3));
+            i += 3;
+            continue;
+        }
+        if i + 4 <= data.len()
+            && data[i] == 0
+            && data[i + 1] == 0
+            && data[i + 2] == 0
+            && data[i + 3] == 1
+        {
+            starts.push((i, 4));
+            i += 4;
+            continue;
+        }
+        i += 1;
+    }
+    if starts.len() < 2 {
+        return None;
+    }
+    let mut nals = Vec::new();
+    for idx in 0..starts.len() {
+        let (start, code_len) = starts[idx];
+        let end = if idx + 1 < starts.len() {
+            starts[idx + 1].0
+        } else {
+            data.len()
+        };
+        if start + code_len >= end {
+            continue;
+        }
+        let nal_type = data[start + code_len] & 0x1F;
+        let is_idr = nal_type == 5;
+        nals.push((start, end, is_idr));
+    }
+    if nals.is_empty() {
+        None
+    } else {
+        Some(nals)
+    }
+}
+
+fn group_nals(
+    data: &[u8],
+    nals: &[(usize, usize, bool)],
+    max_chunk_size: u64,
+) -> Vec<ChunkWithMeta> {
+    let mut chunks = Vec::new();
+    let mut current = Vec::new();
+    for (start, end, is_idr) in nals {
+        let nal_len = end - start;
+        if *is_idr && !current.is_empty() {
+            chunks.push(ChunkWithMeta {
+                data: std::mem::take(&mut current),
+                pts: None,
+            });
+        }
+        if !current.is_empty() && current.len() as u64 + nal_len as u64 > max_chunk_size {
+            chunks.push(ChunkWithMeta {
+                data: std::mem::take(&mut current),
+                pts: None,
+            });
+        }
+        current.extend_from_slice(&data[*start..*end]);
+    }
+    if !current.is_empty() {
+        chunks.push(ChunkWithMeta {
+            data: current,
+            pts: None,
+        });
+    }
+    chunks
+}
+
+fn fallback_chunking(data: &[u8], max_chunk_size: u64) -> Vec<ChunkWithMeta> {
+    let mut chunks = Vec::new();
+    let mut offset = 0usize;
+    let chunk_size = max_chunk_size as usize;
+    while offset < data.len() {
+        let end = (offset + chunk_size).min(data.len());
+        chunks.push(ChunkWithMeta {
+            data: data[offset..end].to_vec(),
+            pts: None,
+        });
+        offset = end;
+    }
+    chunks
+}
+
+fn build_track_tables(
+    track_id: u32,
+    proofs: &[signmedia::models::MerkleProof],
+    chunks: &[Vec<u8>],
+) -> Result<(Vec<TrackTableEntry>, Vec<ChunkTableEntry>)> {
+    let mut chunk_table = Vec::with_capacity(chunks.len());
+    let mut offset = 0u64;
+    for (index, chunk) in chunks.iter().enumerate() {
+        let size = chunk.len() as u64;
+        let chunk_index = proofs
+            .get(index)
+            .map(|proof| proof.chunk_index)
+            .unwrap_or(index as u64);
+        chunk_table.push(ChunkTableEntry {
+            track_id,
+            chunk: TrackChunkIndexEntry {
+                chunk_index,
+                pts: None,
+                offset,
+                size,
+            },
+        });
+        offset += size;
+    }
+    let track_table = vec![TrackTableEntry {
+        track_id,
+        codec: "raw".to_string(),
+        total_chunks: chunks.len() as u64,
+        chunk_size: chunks
+            .iter()
+            .map(|chunk| chunk.len() as u64)
+            .max()
+            .unwrap_or(0),
+        chunk_index_count: chunks.len() as u64,
+    }];
+    Ok((track_table, chunk_table))
 }
