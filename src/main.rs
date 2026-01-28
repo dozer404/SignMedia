@@ -28,11 +28,11 @@ enum Commands {
         #[arg(short, long, default_value = "key.priv")]
         output: PathBuf,
     },
-    /// Sign a media file and create a .smed container
+    /// Sign one or more media files and create a .smed container
     Sign {
-        /// Input media file
-        #[arg(short, long)]
-        input: PathBuf,
+        /// Input media files
+        #[arg(short, long, required = true, num_args = 1..)]
+        inputs: Vec<PathBuf>,
         /// Private key file
         #[arg(short, long)]
         key: PathBuf,
@@ -69,6 +69,15 @@ enum Commands {
         /// End chunk index (exclusive)
         #[arg(long)]
         end: u64,
+        /// Track ID to clip (defaults to 0)
+        #[arg(long, default_value_t = 0)]
+        track: u32,
+    },
+    /// Show information about a .smed file
+    Info {
+        /// Input .smed file
+        #[arg(short, long)]
+        input: PathBuf,
     },
 }
 
@@ -86,13 +95,13 @@ fn main() -> Result<()> {
             );
         }
         Commands::Sign {
-            input,
+            inputs,
             key,
             output,
             title,
             chunk_size,
         } => {
-            sign_command(input, key, output, title, chunk_size)?;
+            sign_command(inputs, key, output, title, chunk_size)?;
         }
         Commands::Verify { input } => {
             verify_command(input)?;
@@ -103,8 +112,12 @@ fn main() -> Result<()> {
             output,
             start,
             end,
+            track,
         } => {
-            clip_command(input, key, output, start, end)?;
+            clip_command(input, key, output, start, end, track)?;
+        }
+        Commands::Info { input } => {
+            info_command(input)?;
         }
     }
 
@@ -149,8 +162,8 @@ fn verify_manifest_signatures(manifest: &SignedManifest, content_name: &str) -> 
 }
 
 fn verify_original_signature(owd: &OriginalWorkDescriptor, signature_hex: &str) -> Result<()> {
-    let original_owd_json = serde_json::to_vec(owd)?;
-    let original_owd_hash = crypto::hash_data(&original_owd_json);
+    let content = ManifestContent::Original(owd.clone());
+    let original_owd_hash = hash_manifest_content(&content)?;
     let orig_pubkey_bytes = hex::decode(&owd.authors[0].author_id)?;
     let orig_verifying_key = VerifyingKey::from_bytes(
         &orig_pubkey_bytes
@@ -172,7 +185,7 @@ fn verify_original_signature(owd: &OriginalWorkDescriptor, signature_hex: &str) 
 }
 
 fn sign_command(
-    input: PathBuf,
+    inputs: Vec<PathBuf>,
     key_path: PathBuf,
     output: PathBuf,
     title: String,
@@ -184,45 +197,68 @@ fn sign_command(
         .map_err(|_| anyhow!("Invalid key size"))?;
     let signing_key = SigningKey::from_bytes(&key_array);
 
-    let file = fs::File::open(&input).context("Failed to open input file")?;
-    let mut reader = BufReader::new(file);
+    let mut all_chunks = Vec::new();
+    let mut track_metadata = Vec::new();
+    let mut track_table = Vec::new();
+    let mut chunk_table = Vec::with_capacity(inputs.len() * 10); // heuristic
+    let mut global_offset = 0u64;
 
-    let mut chunks = Vec::new();
-    let mut chunk_hashes = Vec::new();
-    let mut first_chunk_data = None;
-    let chunked = chunk_media(&mut reader, max_chunk_size)?;
-    let mut chunk_index = Vec::with_capacity(chunked.len());
-    let mut chunk_table = Vec::with_capacity(chunked.len());
-    let mut offset = 0u64;
-    for (index, chunk) in chunked.into_iter().enumerate() {
-        let size = chunk.data.len() as u64;
-        if first_chunk_data.is_none() {
-            first_chunk_data = Some(chunk.data.clone());
-        }
-        chunk_hashes.push(crypto::hash_data(&chunk.data));
-        chunk_index.push(TrackChunkIndexEntry {
-            chunk_index: index as u64,
-            pts: chunk.pts,
-            offset,
-            size,
-        });
-        chunk_table.push(ChunkTableEntry {
-            track_id: 0,
-            chunk: TrackChunkIndexEntry {
+    for (track_idx, input) in inputs.iter().enumerate() {
+        let track_id = track_idx as u32;
+        let file = fs::File::open(input).context(format!("Failed to open input file {:?}", input))?;
+        let mut reader = BufReader::new(file);
+
+        let mut current_track_chunks = Vec::new();
+        let mut chunk_hashes = Vec::new();
+        let mut first_chunk_data = None;
+        let chunked = chunk_media(&mut reader, max_chunk_size)?;
+        let mut track_chunk_index = Vec::with_capacity(chunked.len());
+
+        for (index, chunk) in chunked.into_iter().enumerate() {
+            let size = chunk.data.len() as u64;
+            if first_chunk_data.is_none() {
+                first_chunk_data = Some(chunk.data.clone());
+            }
+            chunk_hashes.push(crypto::hash_data(&chunk.data));
+            let entry = TrackChunkIndexEntry {
                 chunk_index: index as u64,
                 pts: chunk.pts,
-                offset,
+                offset: global_offset,
                 size,
-            },
+            };
+            track_chunk_index.push(entry.clone());
+            chunk_table.push(ChunkTableEntry {
+                track_id,
+                chunk: entry,
+            });
+            global_offset += size;
+            current_track_chunks.push(chunk.data);
+        }
+
+        let tree = MerkleTree::new(chunk_hashes);
+        let root = tree.root();
+        let p_hash = first_chunk_data.and_then(|data| crypto::compute_perceptual_hash(&data));
+
+        track_metadata.push(TrackMetadata {
+            track_id,
+            codec: "raw".to_string(),
+            merkle_root: hex::encode(root),
+            perceptual_hash: p_hash,
+            total_chunks: current_track_chunks.len() as u64,
+            chunk_size: max_chunk_size,
+            chunk_index: track_chunk_index,
         });
-        offset += size;
-        chunks.push(chunk.data);
+
+        track_table.push(TrackTableEntry {
+            track_id,
+            codec: "raw".to_string(),
+            total_chunks: current_track_chunks.len() as u64,
+            chunk_size: max_chunk_size,
+            chunk_index_count: current_track_chunks.len() as u64,
+        });
+
+        all_chunks.extend(current_track_chunks);
     }
-
-    let tree = MerkleTree::new(chunk_hashes);
-    let root = tree.root();
-
-    let p_hash = first_chunk_data.and_then(|data| crypto::compute_perceptual_hash(&data));
 
     let owd = OriginalWorkDescriptor {
         work_id: Uuid::new_v4(),
@@ -233,24 +269,16 @@ fn sign_command(
             role: "Creator".to_string(),
         }],
         created_at: Utc::now(),
-        tracks: vec![TrackMetadata {
-            track_id: 0,
-            codec: "raw".to_string(),
-            merkle_root: hex::encode(root),
-            perceptual_hash: p_hash,
-            total_chunks: chunks.len() as u64,
-            chunk_size: max_chunk_size,
-            chunk_index,
-        }],
+        tracks: track_metadata,
     };
 
-    let owd_json = serde_json::to_vec(&owd)?;
-    let owd_hash = crypto::hash_data(&owd_json);
+    let content = ManifestContent::Original(owd);
+    let content_hash = hash_manifest_content(&content)?;
 
-    let signature = crypto::sign(&owd_hash, &signing_key);
+    let signature = crypto::sign(&content_hash, &signing_key);
 
     let manifest = SignedManifest {
-        content: ManifestContent::Original(owd),
+        content,
         signatures: vec![signmedia::models::SignatureEntry {
             signature: hex::encode(signature.to_bytes()),
             public_key: hex::encode(signing_key.verifying_key().to_bytes()),
@@ -259,14 +287,7 @@ fn sign_command(
 
     let out_file = fs::File::create(&output).context("Failed to create output file")?;
     let mut writer = SmedWriter::new(out_file);
-    let track_table = vec![TrackTableEntry {
-        track_id: 0,
-        codec: "raw".to_string(),
-        total_chunks: chunks.len() as u64,
-        chunk_size: max_chunk_size,
-        chunk_index_count: chunks.len() as u64,
-    }];
-    writer.write_all(&manifest, &track_table, &chunk_table, &chunks)?;
+    writer.write_all(&manifest, &track_table, &chunk_table, &all_chunks)?;
 
     println!("Successfully signed and saved to {:?}", output);
     Ok(())
@@ -338,6 +359,21 @@ fn verify_command(input: PathBuf) -> Result<()> {
             }
         }
         ManifestContent::Derivative(dwd) => {
+            println!("\n[PROVENANCE CHAIN]");
+            println!("  (Original: {})", dwd.original_owd.title);
+            for (i, ancestor) in dwd.ancestry.iter().enumerate() {
+                let id = match &ancestor.content {
+                    ManifestContent::Original(o) => o.work_id.to_string(),
+                    ManifestContent::Derivative(d) => d.derivative_id.to_string(),
+                };
+                println!("     │");
+                println!("     ▼");
+                println!("  (Ancestor {}: {})", i + 1, id);
+            }
+            println!("     │");
+            println!("     ▼");
+            println!("  (Current: {})\n", dwd.derivative_id);
+
             println!("Verifying provenance chain...");
             println!("Original Authors:");
             for author in &dwd.original_owd.authors {
@@ -382,20 +418,31 @@ fn verify_command(input: PathBuf) -> Result<()> {
             }
 
             // 3. Verify clip integrity and Merkle proofs
-            println!("Verifying clip integrity and Merkle proofs against original root...");
-            let original_root: crypto::Hash = hex::decode(&dwd.original_owd.tracks[0].merkle_root)?
-                .try_into()
-                .map_err(|_| anyhow!("Invalid original root"))?;
+            println!("\nVerifying clip integrity and Merkle proofs against original root...");
 
             let mut current_offset = 0;
             let mut consumed_bytes = 0u64;
             for mapping in &dwd.clip_mappings {
+                let original_track = dwd
+                    .original_owd
+                    .tracks
+                    .iter()
+                    .find(|t| t.track_id == mapping.track_id)
+                    .context(format!(
+                        "Original track {} not found for mapping",
+                        mapping.track_id
+                    ))?;
+
+                let original_root: crypto::Hash = hex::decode(&original_track.merkle_root)?
+                    .try_into()
+                    .map_err(|_| anyhow!("Invalid original root"))?;
+
                 let chunk_lookup = reader
                     .chunk_index_for_track(mapping.track_id)
                     .map(|entries| {
                         let mut lookup = std::collections::HashMap::new();
                         for entry in entries {
-                            lookup.insert(entry.chunk_index, entry);
+                            lookup.insert(entry.chunk_index, entry.clone());
                         }
                         lookup
                     });
@@ -461,12 +508,83 @@ fn verify_command(input: PathBuf) -> Result<()> {
     Ok(())
 }
 
+fn info_command(input: PathBuf) -> Result<()> {
+    let file = fs::File::open(&input).context("Failed to open file")?;
+    let reader = SmedReader::new(file).context("Failed to initialize SmedReader")?;
+
+    println!("--- SignMedia File Information ---");
+    println!("File: {:?}", input);
+
+    let manifest = &reader.manifest;
+    match &manifest.content {
+        ManifestContent::Original(owd) => {
+            println!("Type: Original Work");
+            println!("Title: {}", owd.title);
+            println!("Work ID: {}", owd.work_id);
+            println!("Created: {}", owd.created_at);
+            println!("Authors:");
+            for author in &owd.authors {
+                println!(
+                    "  - {} ({}, ID: {})",
+                    author.name, author.role, author.author_id
+                );
+            }
+            println!("Tracks: {}", owd.tracks.len());
+            for track in &owd.tracks {
+                println!(
+                    "  Track {}: Codec: {}, Chunks: {}, Root: {}",
+                    track.track_id, track.codec, track.total_chunks, track.merkle_root
+                );
+            }
+        }
+        ManifestContent::Derivative(dwd) => {
+            println!("Type: Derivative Work");
+            println!("Derivative ID: {}", dwd.derivative_id);
+            println!("Clipper ID: {}", dwd.clipper_id);
+            println!("Created: {}", dwd.created_at);
+            println!("Original Work:");
+            println!("  Title: {}", dwd.original_owd.title);
+            println!("  Work ID: {}", dwd.original_owd.work_id);
+            println!("  Authors:");
+            for author in &dwd.original_owd.authors {
+                println!("    - {} ({})", author.name, author.role);
+            }
+            println!("Ancestry: {} levels", dwd.ancestry.len());
+            println!("Clip Mappings: {}", dwd.clip_mappings.len());
+            for mapping in &dwd.clip_mappings {
+                println!(
+                    "  Track {}: Chunks {}..{}",
+                    mapping.track_id, mapping.start_chunk_index, mapping.end_chunk_index
+                );
+            }
+        }
+    }
+
+    if !reader.track_table.is_empty() {
+        println!("Container Track Table:");
+        for entry in &reader.track_table {
+            println!(
+                "  Track {}: Codec: {}, Total Chunks: {}",
+                entry.track_id, entry.codec, entry.total_chunks
+            );
+        }
+    }
+
+    println!("Signatures: {}", manifest.signatures.len());
+    for sig in &manifest.signatures {
+        println!("  - Key: {}", sig.public_key);
+    }
+
+    Ok(())
+}
+
 fn clip_command(
     input: PathBuf,
     key_path: PathBuf,
     output: PathBuf,
     start: u64,
     end: u64,
+    track_id_to_clip: u32,
 ) -> Result<()> {
     let key_bytes = fs::read(key_path).context("Failed to read key file")?;
     let key_array: [u8; 32] = key_bytes
@@ -506,7 +624,11 @@ fn clip_command(
         };
 
     let (track_id, total_chunks, chunk_size_orig, track_index) = {
-        let track = &original_owd.tracks[0];
+        let track = original_owd
+            .tracks
+            .iter()
+            .find(|t| t.track_id == track_id_to_clip)
+            .context(format!("Track {} not found in original work", track_id_to_clip))?;
         (
             track.track_id,
             track.total_chunks,
@@ -531,7 +653,7 @@ fn clip_command(
             .map(|entries| {
                 let mut lookup = std::collections::HashMap::new();
                 for entry in entries {
-                    lookup.insert(entry.chunk_index, entry);
+                    lookup.insert(entry.chunk_index, entry.clone());
                 }
                 lookup
             });
@@ -588,16 +710,16 @@ fn clip_command(
                 track_id: mapping.track_id,
                 start_chunk_index: start,
                 end_chunk_index: end,
-                proofs,
+                proofs: proofs.clone(),
             }],
         };
 
-        let dwd_json = serde_json::to_vec(&dwd)?;
-        let dwd_hash = crypto::hash_data(&dwd_json);
-        let signature = crypto::sign(&dwd_hash, &signing_key);
+        let content = ManifestContent::Derivative(dwd);
+        let content_hash = hash_manifest_content(&content)?;
+        let signature = crypto::sign(&content_hash, &signing_key);
 
         let manifest = SignedManifest {
-            content: ManifestContent::Derivative(dwd),
+            content,
             signatures: vec![signmedia::models::SignatureEntry {
                 signature: hex::encode(signature.to_bytes()),
                 public_key: hex::encode(signing_key.verifying_key().to_bytes()),
@@ -674,16 +796,16 @@ fn clip_command(
             track_id,
             start_chunk_index: start,
             end_chunk_index: end,
-            proofs,
+            proofs: proofs.clone(),
         }],
     };
 
-    let dwd_json = serde_json::to_vec(&dwd)?;
-    let dwd_hash = crypto::hash_data(&dwd_json);
-    let signature = crypto::sign(&dwd_hash, &signing_key);
+    let content = ManifestContent::Derivative(dwd);
+    let content_hash = hash_manifest_content(&content)?;
+    let signature = crypto::sign(&content_hash, &signing_key);
 
     let manifest = SignedManifest {
-        content: ManifestContent::Derivative(dwd),
+        content,
         signatures: vec![signmedia::models::SignatureEntry {
             signature: hex::encode(signature.to_bytes()),
             public_key: hex::encode(signing_key.verifying_key().to_bytes()),
