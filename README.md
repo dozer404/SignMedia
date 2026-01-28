@@ -2,11 +2,16 @@
 
 <div align="center">
 
-## Donations
-![Logo](./Donations.png)
-**XMR:**
-87wqyoRwNdJaCpR9gvXwuQaBYAJtuytEw9NV8Rz2j31AJfhqkjxSSkogRLgB7zKcoDbwE2MAY9MdNZKNQRWmkNRJPNz2qXD
+<h2>Donations</h2>
+<p>
+  <img src="./Donations.png" alt="Donations Logo" width="200">
+</p>
+<p><strong>XMR:</strong></p>
+<p>
+  <sub>87wqyoRwNdJaCpR9gvXwuQaBYAJtuytEw9NV8Rz2j31AJfhqkjxSSkogRLgB7zKcoDbwE2MAY9MdNZKNQRWmkNRJPNz2qXD</sub>
+</p>
 </div>
+
 
 ## Overview
 
