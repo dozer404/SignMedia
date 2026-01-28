@@ -1,6 +1,6 @@
-# SignMedia: Cryptographically Verifiable Media Codec & Provenance Container
-
 <div align="center">
+
+# SignMedia: Cryptographically Verifiable Media Codec & Provenance Container
 
 <h2>Donations</h2>
 <p>
@@ -245,28 +245,28 @@ Sign a file and create a `.smed` container:
 
 SignMedia defends against:
 
--   Bitstream tampering\
--   Metadata tampering\
--   Clip forgery\
--   Deepfake misattribution\
+-   Bitstream tampering
+-   Metadata tampering
+-   Clip forgery
+-   Deepfake misattribution
 -   Cropped/trimmed media being presented as unrelated content
 
 Threat model includes:
 
--   Malicious editors\
--   Man-in-the-middle distributors\
--   Long-term archival corruption\
+-   Malicious editors
+-   Man-in-the-middle distributors
+-   Long-term archival corruption
 -   Watermark-stripping attempts
 
 ------------------------------------------------------------------------
 
 ## Implementation Notes
 
--   Written in **Rust** for safety and performance\
--   Uses **Ed25519** for signatures\
--   Uses **BLAKE3** for Merkle leaves\
--   Uses **CBOR** for compact metadata\
--   Supports streaming verification for very large media files\
+-   Written in **Rust** for safety and performance
+-   Uses **Ed25519** for signatures
+-   Uses **BLAKE3** for Merkle leaves
+-   Uses **CBOR** for compact metadata
+-   Supports streaming verification for very large media files
 -   Compatible with FFmpeg for decoding
 
 ------------------------------------------------------------------------
@@ -283,22 +283,15 @@ Threat model includes:
 
 ### v1.5
 
--   Streaming verification API\
--   Multi-track support (subtitles, metadata, multi-angle video)\
+-   Streaming verification API
+-   Multi-track support (subtitles, metadata, multi-angle video)
 -   Optional watermarking layer
 
 ### v2.0
 
--   Extended provenance graph (collabs, remixes, overlays)\
--   Hardware-backed signature verification (TPM/TEE)\
+-   Extended provenance graph (collabs, remixes, overlays)
+-   Hardware-backed signature verification (TPM/TEE)
 -   Zero-knowledge clip proofs (experimental)
-
-------------------------------------------------------------------------
-
-## License
-
-MIT for reference implementation.\
-OWD/DWD spec released royalty‑free.
 
 ------------------------------------------------------------------------
 
