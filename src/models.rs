@@ -1,6 +1,6 @@
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
-use chrono::{DateTime, Utc};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OriginalWorkDescriptor {
@@ -22,7 +22,7 @@ pub struct AuthorMetadata {
 pub struct TrackMetadata {
     pub track_id: u32,
     pub codec: String,
-    pub merkle_root: String, // Hex encoded
+    pub merkle_root: String,             // Hex encoded
     pub perceptual_hash: Option<String>, // Hex encoded
     pub total_chunks: u64,
     pub chunk_size: u64,
@@ -33,6 +33,8 @@ pub struct DerivativeWorkDescriptor {
     pub derivative_id: Uuid,
     pub original_owd: OriginalWorkDescriptor,
     pub original_signature: String, // Hex
+    #[serde(default)]
+    pub ancestry: Vec<SignedManifest>,
     pub clipper_id: String, // public key hex
     pub created_at: DateTime<Utc>,
     pub clip_mappings: Vec<ClipMapping>,
@@ -69,7 +71,7 @@ pub struct SignedManifest {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SignatureEntry {
-    pub signature: String, // Hex
+    pub signature: String,  // Hex
     pub public_key: String, // Hex
 }
 
