@@ -6,8 +6,8 @@
 **XMR:**
 ![Logo](./Donations.png)
 87wqyoRwNdJaCpR9gvXwuQaBYAJtuytEw9NV8Rz2j31AJfhqkjxSSkogRLgB7zKcoDbwE2MAY9MdNZKNQRWmkNRJPNz2qXD
-
 </div>
+
 ## Overview
 
 **SignMedia** is a next-generation media container and provenance
