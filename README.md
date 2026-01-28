@@ -182,19 +182,15 @@ Sign a file and create a `.smed` container:
 
 ### Create a signed original
 
-    smed-sign-original input.mp4     --author-key private.ed25519     --output original.smed
+    sign input.mp4     --author-key private.ed25519     --output original.smed
 
 ### Verify original
 
-    smed-verify-original original.smed
+    verify original.smed
 
 ### Create a clip (00:10 - 00:25)
 
-    smed-create-clip original.smed     --start 10 --end 25     --editor-key editor.key     --output clip.smed
-
-### Verify the clip's chain
-
-    smed-verify-clip clip.smed original.smed
+    clip original.smed     --start 10 --end 25     --editor-key editor.key     --output clip.smed
 
 ------------------------------------------------------------------------
 
