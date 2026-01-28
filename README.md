@@ -16,7 +16,7 @@
 ## Overview
 
 **SignMedia** is a next-generation media container and provenance
-system designed for long-term digital media authenticity.\
+system designed for long-term digital media authenticity.
 It is **not a real-time codec**, but a **digital preservation,
 attribution, and derivative‑tracking format** designed to ensure that:
 
@@ -41,9 +41,9 @@ and long-term cultural preservation**.
 
 Each stored media asset contains an **Original Work Descriptor (OWD)**:
 
--   Title, author identity, creation timestamp\
--   Codec and track metadata\
--   A Merkle-tree root hash for each track\
+-   Title, author identity, creation timestamp
+-   Codec and track metadata
+-   A Merkle-tree root hash for each track
 -   A cryptographic signature (Ed25519 by default)
 
 This signature guarantees the authenticity and integrity of the original
@@ -55,10 +55,10 @@ media.
 
 Derived works embed a **Derivative Work Descriptor (DWD)**:
 
--   Reference to original work ID\
--   Chunk-range mapping (which portions were used)\
--   Merkle proofs showing those chunks exist in the original\
--   Optional additional creator signature for the editor or clipper\
+-   Reference to original work ID
+-   Chunk-range mapping (which portions were used)
+-   Merkle proofs showing those chunks exist in the original
+-   Optional additional creator signature for the editor or clipper
 -   New Merkle-root hash for the derived content
 
 This supports a cryptographically traceable edit lineage:
@@ -73,12 +73,12 @@ Any viewer can validate the full ancestry.
 
 ### ✔ Codec-Agnostic Compression Layer
 
-SignMedia does **not** define new audio/video transforms.\
+SignMedia does **not** define new audio/video transforms.
 Instead, it supports:
 
--   H.264 / H.265 / AV1\
+-   H.264 / H.265 / AV1
 -   VP9\
--   AAC / Opus / FLAC / PCM\
+-   AAC / Opus / FLAC / PCM
 -   (Optional) Custom experimental codecs
 
 The provenance system treats the media payloads as opaque binary chunks.
@@ -88,11 +88,11 @@ The provenance system treats the media payloads as opaque binary chunks.
 ### ✔ Cryptographic Chunking & Merkle Trees
 
 Every media file is chunked (default: 1-second GOP/audio slices), then
-hashed.\
+hashed.
 Hashes become the leaves of a Merkle tree, enabling:
 
--   Segment-level integrity checks\
--   Fast attribution for clips (verify only the referenced chunks)\
+-   Segment-level integrity checks
+-   Fast attribution for clips (verify only the referenced chunks)
 -   Extremely compact proofs stored inside the DWD
 
 This allows clips to remain lightweight while retaining cryptographic
@@ -104,11 +104,11 @@ traceability.
 
 SignMedia introduces a `.smed` container with:
 
--   A binary header\
--   Track table\
--   Media payload chunks\
--   OWD / DWD metadata blocks\
--   Signature blocks\
+-   A binary header
+-   Track table
+-   Media payload chunks
+-   OWD / DWD metadata blocks
+-   Signature blocks
 -   Optional embedded key/cert bundles
 
 Decoders can extract embedded bitstreams and pipe them to standard
@@ -122,7 +122,7 @@ SignMedia is structured into **three layers**:
 
 ### 1. Essence Layer (Existing Codecs)
 
-Stores raw compressed bytes: - `VTRACK0`: H.264 bitstream\
+Stores raw compressed bytes: - `VTRACK0`: H.264 bitstream
 - `ATRACK0`: Opus bitstream
 
 These bytes are chunked but not modified.
@@ -133,21 +133,21 @@ These bytes are chunked but not modified.
 
 Handles hashing, signatures, identity, and mapping.
 
-Key concepts: - **Chunk** --- uniform block of video/audio bytes\
-- **Hash** --- SHA-256 or BLAKE3\
-- **Merkle Tree** --- one per track\
-- **OWD** --- Original Work Descriptor\
-- **DWD** --- Derivative Work Descriptor\
+Key concepts: - **Chunk** --- uniform block of video/audio bytes
+- **Hash** --- SHA-256 or BLAKE3
+- **Merkle Tree** --- one per trac
+- **OWD** --- Original Work Descriptor
+- **DWD** --- Derivative Work Descriptor
 - **Signatures** --- Ed25519
 
 ------------------------------------------------------------------------
 
 ### 3. Container Layer
 
-Defines: - Header structures\
-- Track metadata\
-- Embedded manifests\
-- Navigation tables\
+Defines: - Header structures
+- Track metadata
+- Embedded manifests
+- Navigation tables
 - Payload alignment
 
 ------------------------------------------------------------------------
@@ -275,10 +275,10 @@ Threat model includes:
 
 ### v1.0
 
--   Original signing\
--   Clip provenance\
--   SMED container\
--   Rust-based reference decoder\
+-   Original signing
+-   Clip provenance
+-   SMED container
+-   Rust-based reference decoder
 -   CLI tools
 
 ### v1.5
@@ -297,13 +297,13 @@ Threat model includes:
 
 ## Why SignMedia Matters
 
-Digital media manipulation is accelerating.\
+Digital media manipulation is accelerating.
 SignMedia is built to ensure:
 
--   **Artists get credit.**\
--   **Journalism stays verifiable.**\
--   **Court evidence remains uncompromised.**\
--   **Historical records remain immutable.**\
+-   **Artists get credit.**
+-   **Journalism stays verifiable.**
+-   **Court evidence remains uncompromised.**
+-   **Historical records remain immutable.**
 -   **Clips & remixes preserve lineage.**
 
 It's a codec+container for the authenticity-first era.
