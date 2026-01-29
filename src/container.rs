@@ -499,6 +499,13 @@ mod tests {
                 tracks: vec![crate::models::TrackMetadata {
                     track_id: 0,
                     codec: "raw".to_string(),
+                    codec_extradata: None,
+                    width: None,
+                    height: None,
+                    sample_rate: None,
+                    channel_count: None,
+                    timebase_num: None,
+                    timebase_den: None,
                     merkle_root: hex::encode([0u8; 32]),
                     perceptual_hash: None,
                     total_chunks: 1,

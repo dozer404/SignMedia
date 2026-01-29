@@ -624,10 +624,29 @@ fn info_command(input: PathBuf) -> Result<()> {
 }
 
 struct ExtractTrackOutput {
-    track_id: u32,
-    codec: String,
     format: String,
     path: PathBuf,
+}
+
+fn extract_raw_track_passthrough(
+    reader: &mut SmedReader<fs::File>,
+    track: &TrackMetadata,
+    file_len: u64,
+    track_count: usize,
+    output: &PathBuf,
+) -> Result<()> {
+    let mut entries = resolve_chunk_entries(reader, track, file_len, track_count)?;
+    entries.sort_by_key(|entry| entry.offset);
+
+    let mut writer = BufWriter::new(
+        fs::File::create(output).context("Failed to create output file")?,
+    );
+    for entry in entries {
+        let data = reader.read_variable_chunk(entry.offset, entry.size)?;
+        writer.write_all(&data)?;
+    }
+    writer.flush()?;
+    Ok(())
 }
 
 fn extract_command(input: PathBuf, output: PathBuf) -> Result<()> {
@@ -670,6 +689,18 @@ fn extract_command(input: PathBuf, output: PathBuf) -> Result<()> {
         ));
     }
 
+    if track_ids.len() == 1 {
+        let track_id = track_ids[0];
+        let track = tracks_by_id
+            .get(&track_id)
+            .context(format!("Missing track metadata for track {}", track_id))?;
+        if track.codec.eq_ignore_ascii_case("raw") {
+            extract_raw_track_passthrough(&mut reader, track, file_len, track_ids.len(), &output)?;
+            println!("Extracted raw track written to {:?}", output);
+            return Ok(());
+        }
+    }
+
     let temp_dir = std::env::temp_dir().join(format!("smed-extract-{}", Uuid::new_v4()));
     fs::create_dir_all(&temp_dir).context("Failed to create temp directory")?;
 
@@ -705,8 +736,6 @@ fn extract_command(input: PathBuf, output: PathBuf) -> Result<()> {
         writer.flush()?;
 
         track_outputs.push(ExtractTrackOutput {
-            track_id: *track_id,
-            codec: track.codec.clone(),
             format,
             path: track_path,
         });
