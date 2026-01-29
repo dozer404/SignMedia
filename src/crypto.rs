@@ -194,7 +194,7 @@ pub fn compute_perceptual_hash(data: &[u8]) -> Option<String> {
     
     let hasher = HasherConfig::new()
         .hash_alg(HashAlg::Gradient)
-        .hash_size(8, 8)
+        .hash_size(16, 16)
         .to_hasher();
     
     let hash = hasher.hash_image(&dynamic_img);

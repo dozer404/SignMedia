@@ -163,6 +163,7 @@ Commands:
   clip     Create a clip from a .smed file
   info     Show information about a .smed file
   extract  Extract tracks from a .smed file into a container (MP4/MKV)
+  verify-metadata  Verify embedded SignMedia metadata in an extracted container
   help     Print this message or the help of the given subcommand(s)
 
 Options:
@@ -215,6 +216,10 @@ Sign a file and create a `.smed` container:
 ## Extract signed metadata playable file
 
     extract --input original.smed --output extracted.mp4
+
+## Verify extracted file's metadata
+
+    verify-metadata --input extracted.mp4
 
 ### Trusted Third Party (TTP) Setup
 

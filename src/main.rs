@@ -96,6 +96,12 @@ enum Commands {
         #[arg(short, long)]
         output: PathBuf,
     },
+    /// Verify embedded SignMedia metadata in an extracted container
+    VerifyMetadata {
+        /// Input media file (.mp4 or .mkv)
+        #[arg(short, long)]
+        input: PathBuf,
+    },
 }
 
 fn main() -> Result<()> {
@@ -141,6 +147,9 @@ fn main() -> Result<()> {
         }
         Commands::Extract { input, output } => {
             extract_command(input, output)?;
+        }
+        Commands::VerifyMetadata { input } => {
+            verify_metadata_command(input)?;
         }
     }
 
@@ -738,6 +747,116 @@ fn info_command(input: PathBuf) -> Result<()> {
     Ok(())
 }
 
+fn verify_metadata_command(input: PathBuf) -> Result<()> {
+    let output = std::process::Command::new("ffprobe")
+        .args(["-v", "quiet", "-print_format", "json", "-show_format"])
+        .arg(&input)
+        .output()
+        .context("Failed to invoke ffprobe")?;
+    if !output.status.success() {
+        return Err(anyhow!("ffprobe failed with status {}", output.status));
+    }
+
+    #[derive(serde::Deserialize)]
+    struct FfprobeFormat {
+        tags: Option<HashMap<String, String>>,
+    }
+    #[derive(serde::Deserialize)]
+    struct FfprobeOutput {
+        format: Option<FfprobeFormat>,
+    }
+
+    let parsed: FfprobeOutput =
+        serde_json::from_slice(&output.stdout).context("Failed to parse ffprobe JSON")?;
+    let tags = parsed
+        .format
+        .and_then(|fmt| fmt.tags)
+        .ok_or_else(|| anyhow!("No metadata tags found in container"))?;
+
+    let mut normalized = HashMap::new();
+    for (key, value) in tags {
+        normalized.insert(key.to_ascii_lowercase(), value);
+    }
+
+    let manifest_b64 = normalized
+        .get("smed.manifest_b64")
+        .ok_or_else(|| anyhow!("Missing smed.manifest_b64 tag"))?
+        .to_string();
+    let manifest_bytes = general_purpose::STANDARD
+        .decode(manifest_b64.as_bytes())
+        .context("Failed to decode smed.manifest_b64")?;
+
+    let manifest_hash = hex::encode(crypto::hash_data(&manifest_bytes));
+    let parsed_manifest: SignedManifest =
+        serde_json::from_slice(&manifest_bytes).context("Failed to parse SignedManifest JSON")?;
+    let content_hash = hex::encode(hash_manifest_content(&parsed_manifest.content)?);
+
+    let mut mismatches = Vec::new();
+
+    if let Some(expected) = normalized.get("smed.manifest_hash") {
+        if expected.to_ascii_lowercase() != manifest_hash {
+            mismatches.push(format!(
+                "smed.manifest_hash mismatch (expected {}, got {})",
+                expected, manifest_hash
+            ));
+        }
+    } else {
+        mismatches.push("Missing smed.manifest_hash tag".to_string());
+    }
+
+    if let Some(expected) = normalized.get("smed.content_hash") {
+        if expected.to_ascii_lowercase() != content_hash {
+            mismatches.push(format!(
+                "smed.content_hash mismatch (expected {}, got {})",
+                expected, content_hash
+            ));
+        }
+    } else {
+        mismatches.push("Missing smed.content_hash tag".to_string());
+    }
+
+    let (expected_work_id, label) = match &parsed_manifest.content {
+        ManifestContent::Original(owd) => (owd.work_id.to_string(), "smed.work_id"),
+        ManifestContent::Derivative(dwd) => {
+            (dwd.original_owd.work_id.to_string(), "smed.original_work_id")
+        }
+    };
+    if let Some(tag_value) = normalized.get(label) {
+        if tag_value != &expected_work_id {
+            mismatches.push(format!(
+                "{} mismatch (expected {}, got {})",
+                label, tag_value, expected_work_id
+            ));
+        }
+    } else if let Some(tag_value) = normalized.get("smed.work_id") {
+        if tag_value != &expected_work_id {
+            mismatches.push(format!(
+                "smed.work_id mismatch (expected {}, got {})",
+                tag_value, expected_work_id
+            ));
+        }
+    } else if let Some(tag_value) = normalized.get("smed.original_work_id") {
+        if tag_value != &expected_work_id {
+            mismatches.push(format!(
+                "smed.original_work_id mismatch (expected {}, got {})",
+                tag_value, expected_work_id
+            ));
+        }
+    } else {
+        mismatches.push("Missing work id tag (smed.work_id or smed.original_work_id)".to_string());
+    }
+
+    if mismatches.is_empty() {
+        println!("Metadata verification OK");
+        println!("Manifest hash: {}", manifest_hash);
+        println!("Content hash: {}", content_hash);
+        println!("Work ID: {}", expected_work_id);
+        Ok(())
+    } else {
+        Err(anyhow!("Metadata verification failed: {}", mismatches.join("; ")))
+    }
+}
+
 struct ExtractTrackOutput {
     format: String,
     path: PathBuf,
@@ -771,9 +890,14 @@ fn derive_ttp_display_name(
     }
 
     if candidates.len() == 1 {
-        Some(candidates.remove(0))
-    } else {
+        return Some(candidates.remove(0));
+    }
+
+    let fallback = ttp_display_name();
+    if fallback.is_empty() {
         None
+    } else {
+        Some(fallback)
     }
 }
 
