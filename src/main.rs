@@ -8,8 +8,9 @@ use signmedia::models::{
     ManifestContent, OriginalWorkDescriptor, SignedManifest, TrackChunkIndexEntry, TrackMetadata,
 };
 use std::fs;
-use std::io::{BufReader, Read, Seek};
+use std::io::{BufReader, BufWriter, Read, Seek, Write};
 use std::path::PathBuf;
+use std::collections::HashMap;
 use uuid::Uuid;
 
 #[derive(Parser)]
@@ -79,6 +80,15 @@ enum Commands {
         #[arg(short, long)]
         input: PathBuf,
     },
+    /// Extract tracks from a .smed file into a container (MP4/MKV)
+    Extract {
+        /// Input .smed file
+        #[arg(short, long)]
+        input: PathBuf,
+        /// Output container file (.mp4 or .mkv)
+        #[arg(short, long)]
+        output: PathBuf,
+    },
 }
 
 fn main() -> Result<()> {
@@ -118,6 +128,9 @@ fn main() -> Result<()> {
         }
         Commands::Info { input } => {
             info_command(input)?;
+        }
+        Commands::Extract { input, output } => {
+            extract_command(input, output)?;
         }
     }
 
@@ -607,6 +620,157 @@ fn info_command(input: PathBuf) -> Result<()> {
         println!("  - Key: {}", sig.public_key);
     }
 
+    Ok(())
+}
+
+struct ExtractTrackOutput {
+    track_id: u32,
+    codec: String,
+    format: String,
+    path: PathBuf,
+}
+
+fn extract_command(input: PathBuf, output: PathBuf) -> Result<()> {
+    let file = fs::File::open(&input).context("Failed to open file")?;
+    let file_len = file.metadata()?.len();
+    let mut reader = SmedReader::new(file).context("Failed to initialize SmedReader")?;
+
+    let tracks = match &reader.manifest.content {
+        ManifestContent::Original(owd) => owd.tracks.clone(),
+        ManifestContent::Derivative(dwd) => dwd.original_owd.tracks.clone(),
+    };
+    let mut tracks_by_id = HashMap::new();
+    for track in tracks {
+        tracks_by_id.insert(track.track_id, track);
+    }
+
+    let mut track_ids: Vec<u32> = if !reader.track_table.is_empty() {
+        reader.track_table.iter().map(|entry| entry.track_id).collect()
+    } else if !reader.chunk_index.is_empty() {
+        reader.chunk_index.keys().copied().collect()
+    } else {
+        tracks_by_id.keys().copied().collect()
+    };
+    track_ids.sort_unstable();
+    track_ids.dedup();
+
+    if track_ids.is_empty() {
+        return Err(anyhow!("No tracks found in the .smed file"));
+    }
+
+    let output_ext = output
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| ext.to_ascii_lowercase())
+        .unwrap_or_default();
+    if output_ext != "mkv" && output_ext != "mp4" {
+        return Err(anyhow!(
+            "Unsupported output container: {:?} (expected .mp4 or .mkv)",
+            output
+        ));
+    }
+
+    let temp_dir = std::env::temp_dir().join(format!("smed-extract-{}", Uuid::new_v4()));
+    fs::create_dir_all(&temp_dir).context("Failed to create temp directory")?;
+
+    let mut track_outputs = Vec::new();
+    for track_id in &track_ids {
+        let track = tracks_by_id
+            .get(track_id)
+            .context(format!("Missing track metadata for track {}", track_id))?;
+        let mut entries =
+            resolve_chunk_entries(&reader, track, file_len, track_ids.len())?;
+        entries.sort_by_key(|entry| entry.offset);
+
+        let format = match codec_to_ffmpeg_format(&track.codec) {
+            Some(format) => format.to_string(),
+            None => {
+                return Err(anyhow!(
+                    "Unsupported codec {} for container extraction",
+                    track.codec
+                ))
+            }
+        };
+
+        let track_path = temp_dir.join(format!("track-{}-{}.bin", track_id, track.codec));
+        let mut writer = BufWriter::new(
+            fs::File::create(&track_path)
+                .context("Failed to create extracted track file")?,
+        );
+
+        for entry in entries {
+            let data = reader.read_variable_chunk(entry.offset, entry.size)?;
+            writer.write_all(&data)?;
+        }
+        writer.flush()?;
+
+        track_outputs.push(ExtractTrackOutput {
+            track_id: *track_id,
+            codec: track.codec.clone(),
+            format,
+            path: track_path,
+        });
+    }
+
+    mux_tracks_with_ffmpeg(&track_outputs, &output)?;
+
+    for output in &track_outputs {
+        let _ = fs::remove_file(&output.path);
+    }
+    let _ = fs::remove_dir(&temp_dir);
+
+    println!("Extracted container written to {:?}", output);
+    Ok(())
+}
+
+fn resolve_chunk_entries(
+    reader: &SmedReader<fs::File>,
+    track: &TrackMetadata,
+    file_len: u64,
+    track_count: usize,
+) -> Result<Vec<TrackChunkIndexEntry>> {
+    if let Some(entries) = reader.chunk_index_for_track(track.track_id) {
+        return Ok(entries.clone());
+    }
+    if !track.chunk_index.is_empty() {
+        return Ok(track.chunk_index.clone());
+    }
+    if track_count == 1 {
+        let data_size = file_len.saturating_sub(reader.data_start());
+        return Ok(build_sequential_entries(
+            track.total_chunks,
+            track.chunk_size,
+            data_size,
+        ));
+    }
+    Err(anyhow!(
+        "Missing chunk index data for track {}",
+        track.track_id
+    ))
+}
+
+fn codec_to_ffmpeg_format(codec: &str) -> Option<&'static str> {
+    match codec {
+        "h264" => Some("h264"),
+        "aac" => Some("adts"),
+        _ => None,
+    }
+}
+
+fn mux_tracks_with_ffmpeg(tracks: &[ExtractTrackOutput], output: &PathBuf) -> Result<()> {
+    let mut command = std::process::Command::new("ffmpeg");
+    command.arg("-y");
+    for track in tracks {
+        command.arg("-f").arg(&track.format);
+        command.arg("-i").arg(&track.path);
+    }
+    command.arg("-c").arg("copy").arg(output);
+    let status = command
+        .status()
+        .context("Failed to invoke ffmpeg for muxing")?;
+    if !status.success() {
+        return Err(anyhow!("ffmpeg failed with status {}", status));
+    }
     Ok(())
 }
 
