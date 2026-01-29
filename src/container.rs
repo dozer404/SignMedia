@@ -541,6 +541,7 @@ mod tests {
             signatures: vec![SignatureEntry {
                 signature: "sig".to_string(),
                 public_key: "pub".to_string(),
+                display_name: None,
             }],
         };
 

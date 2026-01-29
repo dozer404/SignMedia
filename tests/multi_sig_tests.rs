@@ -39,10 +39,12 @@ fn test_multi_signature_and_fingerprint() {
             SignatureEntry {
                 signature: hex::encode(author_sig.to_bytes()),
                 public_key: hex::encode(author_key.verifying_key().to_bytes()),
+                display_name: None,
             },
             SignatureEntry {
                 signature: hex::encode(ttp_sig.to_bytes()),
                 public_key: hex::encode(ttp_key.verifying_key().to_bytes()),
+                display_name: None,
             },
         ],
     };

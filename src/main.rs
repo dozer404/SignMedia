@@ -11,7 +11,7 @@ use signmedia::models::{
 use std::fs;
 use std::io::{BufReader, BufWriter, Read, Seek, Write};
 use std::path::PathBuf;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 
 #[derive(Parser)]
@@ -44,6 +44,12 @@ enum Commands {
         /// Title of the work
         #[arg(short, long, default_value = "Untitled")]
         title: String,
+        /// Display name for the original author
+        #[arg(long, default_value = "Default Author")]
+        author_name: String,
+        /// Role for the author: original or derivative
+        #[arg(long, default_value = "original")]
+        author_role: String,
         /// Maximum chunk size in bytes (used as a cap for packet-based chunking)
         #[arg(short, long, default_value_t = 1048576)] // 1MB
         chunk_size: u64,
@@ -111,9 +117,11 @@ fn main() -> Result<()> {
             key,
             output,
             title,
+            author_name,
+            author_role,
             chunk_size,
         } => {
-            sign_command(inputs, key, output, title, chunk_size)?;
+            sign_command(inputs, key, output, title, author_name, author_role, chunk_size)?;
         }
         Commands::Verify { input } => {
             verify_command(input)?;
@@ -258,6 +266,8 @@ fn sign_command(
     key_path: PathBuf,
     output: PathBuf,
     title: String,
+    author_name: String,
+    author_role: String,
     max_chunk_size: u64,
 ) -> Result<()> {
     let key_bytes = fs::read(key_path).context("Failed to read key file")?;
@@ -340,11 +350,20 @@ fn sign_command(
         all_chunks.extend(current_track_chunks);
     }
 
+    let normalized_role = author_role.to_ascii_lowercase();
+    if normalized_role != "original" && normalized_role != "derivative" {
+        return Err(anyhow!(
+            "Invalid author role: {} (expected \"original\" or \"derivative\")",
+            author_role
+        ));
+    }
+
     let authors = vec![signmedia::models::AuthorMetadata {
         author_id: hex::encode(signing_key.verifying_key().to_bytes()),
-        name: "Default Author".to_string(),
-        role: "Creator".to_string(),
+        name: author_name,
+        role: normalized_role,
     }];
+    let author_display_name = authors.get(0).map(|author| author.name.clone());
 
     let authorship_fingerprint = Some(crypto::compute_authorship_fingerprint(&authors));
 
@@ -372,10 +391,12 @@ fn sign_command(
             signmedia::models::SignatureEntry {
                 signature: hex::encode(author_signature.to_bytes()),
                 public_key: hex::encode(signing_key.verifying_key().to_bytes()),
+                display_name: author_display_name,
             },
             signmedia::models::SignatureEntry {
                 signature: hex::encode(ttp_signature.to_bytes()),
                 public_key: crypto::get_ttp_public_key(),
+                display_name: Some(ttp_display_name()),
             },
         ],
     };
@@ -675,9 +696,43 @@ fn info_command(input: PathBuf) -> Result<()> {
         }
     }
 
+    let mut author_key_names: HashMap<String, String> = HashMap::new();
+    match &manifest.content {
+        ManifestContent::Original(owd) => {
+            for author in &owd.authors {
+                author_key_names.insert(author.author_id.clone(), author.name.clone());
+            }
+        }
+        ManifestContent::Derivative(dwd) => {
+            author_key_names.insert(dwd.clipper_id.clone(), "Clipper".to_string());
+        }
+    }
+
     println!("Signatures: {}", manifest.signatures.len());
+    let ttp_key = crypto::get_ttp_public_key();
     for sig in &manifest.signatures {
-        println!("  - Key: {}", sig.public_key);
+        let label = if sig.public_key == ttp_key {
+            let ttp_name = sig
+                .display_name
+                .clone()
+                .unwrap_or_else(|| "Trusted Third Party".to_string());
+            if ttp_name == "Trusted Third Party" {
+                "TTP Key".to_string()
+            } else {
+                format!("TTP Key ({})", ttp_name)
+            }
+        } else if let Some(name) = author_key_names.get(&sig.public_key) {
+            if name.is_empty() {
+                "Author Key".to_string()
+            } else {
+                format!("Author Key ({})", name)
+            }
+        } else if let Some(name) = &sig.display_name {
+            format!("Author Key ({})", name)
+        } else {
+            "Author Key".to_string()
+        };
+        println!("  - {}: {}", label, sig.public_key);
     }
 
     Ok(())
@@ -686,6 +741,40 @@ fn info_command(input: PathBuf) -> Result<()> {
 struct ExtractTrackOutput {
     format: String,
     path: PathBuf,
+}
+
+fn ttp_display_name() -> String {
+    std::env::var("SMED_TTP_NAME").unwrap_or_else(|_| "Trusted Third Party".to_string())
+}
+
+fn derive_ttp_display_name(
+    manifest: &SignedManifest,
+    author_names: &HashSet<String>,
+) -> Option<String> {
+    let ttp_key = crypto::get_ttp_public_key();
+    if let Some(entry) = manifest
+        .signatures
+        .iter()
+        .find(|entry| entry.public_key == ttp_key)
+        .and_then(|entry| entry.display_name.clone())
+    {
+        return Some(entry);
+    }
+
+    let mut candidates = Vec::new();
+    for entry in &manifest.signatures {
+        if let Some(name) = &entry.display_name {
+            if !author_names.contains(name) {
+                candidates.push(name.clone());
+            }
+        }
+    }
+
+    if candidates.len() == 1 {
+        Some(candidates.remove(0))
+    } else {
+        None
+    }
 }
 
 fn build_extract_metadata(manifest: &SignedManifest) -> Result<Vec<(String, String)>> {
@@ -712,6 +801,7 @@ fn build_extract_metadata(manifest: &SignedManifest) -> Result<Vec<(String, Stri
         manifest.signatures.len().to_string(),
     ));
 
+    let mut author_names = HashSet::new();
     match &manifest.content {
         ManifestContent::Original(owd) => {
             metadata.push(("smed.type".to_string(), "original".to_string()));
@@ -734,6 +824,14 @@ fn build_extract_metadata(manifest: &SignedManifest) -> Result<Vec<(String, Stri
                     "smed.authorship_fingerprint".to_string(),
                     fp.clone(),
                 ));
+            }
+            if !owd.authors.is_empty() {
+                let names: Vec<String> =
+                    owd.authors.iter().map(|author| author.name.clone()).collect();
+                for name in &names {
+                    author_names.insert(name.clone());
+                }
+                metadata.push(("smed.author_names".to_string(), names.join(", ")));
             }
         }
         ManifestContent::Derivative(dwd) => {
@@ -775,7 +873,23 @@ fn build_extract_metadata(manifest: &SignedManifest) -> Result<Vec<(String, Stri
                     fp.clone(),
                 ));
             }
+            if !dwd.original_owd.authors.is_empty() {
+                let names: Vec<String> = dwd
+                    .original_owd
+                    .authors
+                    .iter()
+                    .map(|author| author.name.clone())
+                    .collect();
+                for name in &names {
+                    author_names.insert(name.clone());
+                }
+                metadata.push(("smed.author_names".to_string(), names.join(", ")));
+            }
         }
+    }
+
+    if let Some(ttp_name) = derive_ttp_display_name(manifest, &author_names) {
+        metadata.push(("smed.ttp_name".to_string(), ttp_name));
     }
 
     Ok(metadata)
@@ -1164,10 +1278,12 @@ fn clip_command(
                 signmedia::models::SignatureEntry {
                     signature: hex::encode(signature.to_bytes()),
                     public_key: hex::encode(signing_key.verifying_key().to_bytes()),
+                    display_name: None,
                 },
                 signmedia::models::SignatureEntry {
                     signature: hex::encode(ttp_signature.to_bytes()),
                     public_key: crypto::get_ttp_public_key(),
+                    display_name: Some(ttp_display_name()),
                 },
             ],
         };
@@ -1240,10 +1356,12 @@ fn clip_command(
             signmedia::models::SignatureEntry {
                 signature: hex::encode(author_signature.to_bytes()),
                 public_key: hex::encode(signing_key.verifying_key().to_bytes()),
+                display_name: None,
             },
             signmedia::models::SignatureEntry {
                 signature: hex::encode(ttp_signature.to_bytes()),
                 public_key: crypto::get_ttp_public_key(),
+                display_name: Some(ttp_display_name()),
             },
         ],
     };

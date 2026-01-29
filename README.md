@@ -198,7 +198,7 @@ Sign a file and create a `.smed` container:
 
 ### Create a signed original
 
-    sign input.mp4  --inputs original.mp4  --key private.key --output original.smed
+    sign --inputs original.mp4  --key key.priv --output original.smed --author-name "Waldo" --author-role original --title "My Work"
 
 ### Verify original
 
@@ -206,7 +206,7 @@ Sign a file and create a `.smed` container:
 
 ### Create a clip (00:10 - 00:25)
 
-    clip original.smed     --start 10 --end 25     --editor-key editor.key     --output clip.smed
+    clip original.smed --start 10 --end 25 --editor-key editor.priv --output clip.smed
 
 ## Get SMED metadata info
 

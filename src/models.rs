@@ -99,6 +99,8 @@ pub struct SignedManifest {
 pub struct SignatureEntry {
     pub signature: String,  // Hex
     pub public_key: String, // Hex
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
