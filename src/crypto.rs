@@ -4,6 +4,7 @@ use img_hash::{HasherConfig, HashAlg};
 use img_hash::image;
 use ed25519_dalek::{SigningKey, VerifyingKey, Signature, Signer, Verifier};
 use std::convert::TryInto;
+use anyhow::{anyhow, Context, Result};
 
 pub type Hash = [u8; 32];
 
@@ -145,6 +146,18 @@ pub fn generate_keypair() -> SigningKey {
 }
 
 pub const TTP_PUBLIC_KEY: &str = "92f2beb2bf58b85302ca00dab45efcbb74a3bfd8ed9a13966f8538f40c0b3e55";
+
+pub fn get_ttp_public_key() -> String {
+    std::env::var("SMED_TTP_PUBLIC_KEY").unwrap_or_else(|_| TTP_PUBLIC_KEY.to_string())
+}
+
+pub fn get_ttp_signing_key() -> Result<SigningKey> {
+    let key_hex = std::env::var("SMED_TTP_PRIVATE_KEY")
+        .context("Missing TTP private key. Set SMED_TTP_PRIVATE_KEY environment variable.")?;
+    let key_bytes = hex::decode(key_hex).context("Invalid TTP key format")?;
+    let key_array: [u8; 32] = key_bytes.try_into().map_err(|_| anyhow!("Invalid TTP key size"))?;
+    Ok(SigningKey::from_bytes(&key_array))
+}
 
 pub fn sign_with_ttp(data: &[u8], signing_key: &SigningKey) -> Signature {
     signing_key.sign(data)
