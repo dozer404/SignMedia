@@ -1292,6 +1292,9 @@ struct AnnexbParseInfo {
 }
 
 fn parse_annexb_nals(data: &[u8]) -> Option<AnnexbParseInfo> {
+    if looks_like_isobmff(data) {
+        return None;
+    }
     let mut starts = Vec::new();
     let mut i = 0usize;
     while i + 3 <= data.len() {
@@ -1367,6 +1370,42 @@ fn parse_annexb_nals(data: &[u8]) -> Option<AnnexbParseInfo> {
             height,
         })
     }
+}
+
+fn looks_like_isobmff(data: &[u8]) -> bool {
+    if data.len() < 12 {
+        return false;
+    }
+    let box_type = &data[4..8];
+    if !box_type.iter().all(|b| b.is_ascii_alphanumeric()) {
+        return false;
+    }
+    if matches!(
+        box_type,
+        b"ftyp" | b"moov" | b"moof" | b"mdat" | b"free" | b"skip" | b"wide" | b"uuid" | b"jumb"
+            | b"meta"
+    ) {
+        return true;
+    }
+    let scan_len = data.len().min(4096);
+    let mut offset = 0usize;
+    while offset + 8 <= scan_len {
+        let size = u32::from_be_bytes([
+            data[offset],
+            data[offset + 1],
+            data[offset + 2],
+            data[offset + 3],
+        ]) as usize;
+        let kind = &data[offset + 4..offset + 8];
+        if matches!(kind, b"ftyp" | b"moov" | b"moof" | b"mdat" | b"jumb" | b"meta") {
+            return true;
+        }
+        if size < 8 || size > scan_len - offset {
+            break;
+        }
+        offset += size;
+    }
+    false
 }
 
 fn group_nals(

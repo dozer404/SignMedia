@@ -77,7 +77,7 @@ SignMedia does **not** define new audio/video transforms.
 Instead, it supports:
 
 -   H.264 / H.265 / AV1
--   VP9\
+-   VP9
 -   AAC / Opus / FLAC / PCM
 -   (Optional) Custom experimental codecs
 
@@ -158,9 +158,11 @@ Usage: signmedia <COMMAND>
 
 Commands:
   gen-key  Generate a new Ed25519 keypair
-  sign     Sign a media file and create a .smed container
+  sign     Sign one or more media files and create a .smed container
   verify   Verify a .smed file
   clip     Create a clip from a .smed file
+  info     Show information about a .smed file
+  extract  Extract tracks from a .smed file into a container (MP4/MKV)
   help     Print this message or the help of the given subcommand(s)
 
 Options:
@@ -190,21 +192,29 @@ Sign a file and create a `.smed` container:
 
 ## Example Workflow
 
+### Create a private key
+
+    gen-key 
+
 ### Create a signed original
 
-    sign input.mp4     --author-key private.ed25519     --output original.smed
+    sign input.mp4  --inputs original.mp4  --key private.key --output original.smed
 
 ### Verify original
 
-    verify original.smed
+    verify --input original.smed
 
 ### Create a clip (00:10 - 00:25)
 
     clip original.smed     --start 10 --end 25     --editor-key editor.key     --output clip.smed
 
-## Get smed info
+## Get SMED metadata info
 
     info --input original.smed
+
+## Extract signed metadata playable file
+
+    extract --input original.smed --output extracted.mp4
 
 ### Trusted Third Party (TTP) Setup
 
