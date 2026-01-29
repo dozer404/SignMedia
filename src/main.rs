@@ -205,13 +205,14 @@ fn sign_command(
 
     for (track_idx, input) in inputs.iter().enumerate() {
         let track_id = track_idx as u32;
-        let file = fs::File::open(input).context(format!("Failed to open input file {:?}", input))?;
+        let file =
+            fs::File::open(input).context(format!("Failed to open input file {:?}", input))?;
         let mut reader = BufReader::new(file);
 
         let mut current_track_chunks = Vec::new();
         let mut chunk_hashes = Vec::new();
         let mut first_chunk_data = None;
-        let chunked = chunk_media(&mut reader, max_chunk_size)?;
+        let (chunked, playback_info) = chunk_media(&mut reader, max_chunk_size)?;
         let mut track_chunk_index = Vec::with_capacity(chunked.len());
 
         for (index, chunk) in chunked.into_iter().enumerate() {
@@ -241,7 +242,17 @@ fn sign_command(
 
         track_metadata.push(TrackMetadata {
             track_id,
-            codec: "raw".to_string(),
+            codec: playback_info.codec.clone(),
+            codec_extradata: playback_info
+                .codec_extradata
+                .as_ref()
+                .map(|data| hex::encode(data)),
+            width: playback_info.width,
+            height: playback_info.height,
+            sample_rate: playback_info.sample_rate,
+            channel_count: playback_info.channels,
+            timebase_num: playback_info.timebase_num,
+            timebase_den: playback_info.timebase_den,
             merkle_root: hex::encode(root),
             perceptual_hash: p_hash,
             total_chunks: current_track_chunks.len() as u64,
@@ -251,7 +262,7 @@ fn sign_command(
 
         track_table.push(TrackTableEntry {
             track_id,
-            codec: "raw".to_string(),
+            codec: playback_info.codec,
             total_chunks: current_track_chunks.len() as u64,
             chunk_size: max_chunk_size,
             chunk_index_count: current_track_chunks.len() as u64,
@@ -628,7 +639,10 @@ fn clip_command(
             .tracks
             .iter()
             .find(|t| t.track_id == track_id_to_clip)
-            .context(format!("Track {} not found in original work", track_id_to_clip))?;
+            .context(format!(
+                "Track {} not found in original work",
+                track_id_to_clip
+            ))?;
         (
             track.track_id,
             track.total_chunks,
@@ -826,19 +840,90 @@ struct ChunkWithMeta {
     pts: Option<i64>,
 }
 
-fn chunk_media(reader: &mut impl Read, max_chunk_size: u64) -> Result<Vec<ChunkWithMeta>> {
-    let mut data = Vec::new();
-    reader.read_to_end(&mut data)?;
-    if let Some(frames) = parse_adts_frames(&data) {
-        return Ok(group_adts_frames(&data, &frames, max_chunk_size));
-    }
-    if let Some(nals) = parse_annexb_nals(&data) {
-        return Ok(group_nals(&data, &nals, max_chunk_size));
-    }
-    Ok(fallback_chunking(&data, max_chunk_size))
+struct TrackPlaybackInfo {
+    codec: String,
+    codec_extradata: Option<Vec<u8>>,
+    width: Option<u32>,
+    height: Option<u32>,
+    sample_rate: Option<u32>,
+    channels: Option<u16>,
+    timebase_num: Option<u32>,
+    timebase_den: Option<u32>,
 }
 
-fn parse_adts_frames(data: &[u8]) -> Option<Vec<(usize, usize, i64)>> {
+fn chunk_media(
+    reader: &mut impl Read,
+    max_chunk_size: u64,
+) -> Result<(Vec<ChunkWithMeta>, TrackPlaybackInfo)> {
+    let mut data = Vec::new();
+    reader.read_to_end(&mut data)?;
+    if let Some(info) = parse_adts_frames(&data) {
+        let chunks = group_adts_frames(&data, &info.frames, max_chunk_size);
+        let codec_extradata = build_aac_extradata(
+            info.audio_object_type,
+            info.sample_rate_index,
+            info.channel_config,
+        );
+        return Ok((
+            chunks,
+            TrackPlaybackInfo {
+                codec: "aac".to_string(),
+                codec_extradata: Some(codec_extradata),
+                width: None,
+                height: None,
+                sample_rate: Some(info.sample_rate),
+                channels: info.channel_config.and_then(|channels| {
+                    if channels == 0 {
+                        None
+                    } else {
+                        Some(channels)
+                    }
+                }),
+                timebase_num: Some(1),
+                timebase_den: Some(1_000_000),
+            },
+        ));
+    }
+    if let Some(info) = parse_annexb_nals(&data) {
+        let chunks = group_nals(&data, &info.nals, max_chunk_size);
+        return Ok((
+            chunks,
+            TrackPlaybackInfo {
+                codec: "h264".to_string(),
+                codec_extradata: info.codec_extradata,
+                width: info.width,
+                height: info.height,
+                sample_rate: None,
+                channels: None,
+                timebase_num: None,
+                timebase_den: None,
+            },
+        ));
+    }
+    Ok((
+        fallback_chunking(&data, max_chunk_size),
+        TrackPlaybackInfo {
+            codec: "raw".to_string(),
+            codec_extradata: None,
+            width: None,
+            height: None,
+            sample_rate: None,
+            channels: None,
+            timebase_num: None,
+            timebase_den: None,
+        },
+    ))
+}
+
+struct AdtsParseInfo {
+    frames: Vec<(usize, usize, i64)>,
+    sample_rate: u32,
+    sample_rate_index: u8,
+    channel_config: Option<u16>,
+    audio_object_type: u8,
+}
+
+fn parse_adts_frames(data: &[u8]) -> Option<AdtsParseInfo> {
     let sample_rates = [
         96000, 88200, 64000, 48000, 44100, 32000, 24000, 22050, 16000, 12000, 11025, 8000, 7350,
     ];
@@ -846,6 +931,9 @@ fn parse_adts_frames(data: &[u8]) -> Option<Vec<(usize, usize, i64)>> {
     let mut offset = 0usize;
     let mut pts_us = 0i64;
     let mut sample_rate = None;
+    let mut sample_rate_index = None;
+    let mut channel_config = None;
+    let mut audio_object_type = None;
     while offset + 7 <= data.len() {
         if data[offset] != 0xFF || (data[offset + 1] & 0xF0) != 0xF0 {
             return None;
@@ -858,10 +946,23 @@ fn parse_adts_frames(data: &[u8]) -> Option<Vec<(usize, usize, i64)>> {
         if frame_length < header_len || offset + frame_length > data.len() {
             return None;
         }
-        let sample_rate_index = ((data[offset + 2] & 0x3C) >> 2) as usize;
-        let sr = sample_rates.get(sample_rate_index).copied()?;
+        let profile = (data[offset + 2] & 0xC0) >> 6;
+        let audio_object = profile + 1;
+        let sr_index = ((data[offset + 2] & 0x3C) >> 2) as usize;
+        let sr = sample_rates.get(sr_index).copied()?;
+        let channel_cfg =
+            (((data[offset + 2] & 0x01) as u16) << 2) | (((data[offset + 3] & 0xC0) as u16) >> 6);
+        sample_rate_index.get_or_insert(sr_index as u8);
         sample_rate.get_or_insert(sr);
         if sample_rate != Some(sr) {
+            return None;
+        }
+        channel_config.get_or_insert(channel_cfg);
+        if channel_config != Some(channel_cfg) {
+            return None;
+        }
+        audio_object_type.get_or_insert(audio_object);
+        if audio_object_type != Some(audio_object) {
             return None;
         }
         frames.push((offset, frame_length, pts_us));
@@ -871,7 +972,13 @@ fn parse_adts_frames(data: &[u8]) -> Option<Vec<(usize, usize, i64)>> {
     if offset != data.len() || frames.is_empty() {
         None
     } else {
-        Some(frames)
+        Some(AdtsParseInfo {
+            frames,
+            sample_rate: sample_rate?,
+            sample_rate_index: sample_rate_index?,
+            channel_config,
+            audio_object_type: audio_object_type?,
+        })
     }
 }
 
@@ -905,7 +1012,14 @@ fn group_adts_frames(
     chunks
 }
 
-fn parse_annexb_nals(data: &[u8]) -> Option<Vec<(usize, usize, bool)>> {
+struct AnnexbParseInfo {
+    nals: Vec<(usize, usize, bool)>,
+    codec_extradata: Option<Vec<u8>>,
+    width: Option<u32>,
+    height: Option<u32>,
+}
+
+fn parse_annexb_nals(data: &[u8]) -> Option<AnnexbParseInfo> {
     let mut starts = Vec::new();
     let mut i = 0usize;
     while i + 3 <= data.len() {
@@ -930,6 +1044,8 @@ fn parse_annexb_nals(data: &[u8]) -> Option<Vec<(usize, usize, bool)>> {
         return None;
     }
     let mut nals = Vec::new();
+    let mut sps = None;
+    let mut pps = None;
     for idx in 0..starts.len() {
         let (start, code_len) = starts[idx];
         let end = if idx + 1 < starts.len() {
@@ -943,11 +1059,41 @@ fn parse_annexb_nals(data: &[u8]) -> Option<Vec<(usize, usize, bool)>> {
         let nal_type = data[start + code_len] & 0x1F;
         let is_idr = nal_type == 5;
         nals.push((start, end, is_idr));
+        match nal_type {
+            7 => {
+                if sps.is_none() {
+                    sps = Some(data[start + code_len..end].to_vec());
+                }
+            }
+            8 => {
+                if pps.is_none() {
+                    pps = Some(data[start + code_len..end].to_vec());
+                }
+            }
+            _ => {}
+        }
     }
     if nals.is_empty() {
         None
     } else {
-        Some(nals)
+        let (codec_extradata, width, height) = match (sps.as_deref(), pps.as_deref()) {
+            (Some(sps_bytes), Some(pps_bytes)) => {
+                let extradata = build_avcc_extradata(sps_bytes, pps_bytes);
+                let (width, height) = parse_h264_sps_dimensions(sps_bytes).unwrap_or((0, 0));
+                (
+                    Some(extradata),
+                    if width == 0 { None } else { Some(width) },
+                    if height == 0 { None } else { Some(height) },
+                )
+            }
+            _ => (None, None, None),
+        };
+        Some(AnnexbParseInfo {
+            nals,
+            codec_extradata,
+            width,
+            height,
+        })
     }
 }
 
@@ -981,6 +1127,203 @@ fn group_nals(
         });
     }
     chunks
+}
+
+fn build_aac_extradata(
+    audio_object_type: u8,
+    sample_rate_index: u8,
+    channel_config: Option<u16>,
+) -> Vec<u8> {
+    let channel_config = channel_config.unwrap_or(0) as u8;
+    let packed = ((audio_object_type & 0x1F) as u16) << 11
+        | ((sample_rate_index & 0x0F) as u16) << 7
+        | ((channel_config & 0x0F) as u16) << 3;
+    vec![(packed >> 8) as u8, packed as u8]
+}
+
+fn build_avcc_extradata(sps: &[u8], pps: &[u8]) -> Vec<u8> {
+    let profile_idc = sps.get(1).copied().unwrap_or(0);
+    let compatibility = sps.get(2).copied().unwrap_or(0);
+    let level_idc = sps.get(3).copied().unwrap_or(0);
+    let mut extradata = Vec::new();
+    extradata.push(1); // configurationVersion
+    extradata.push(profile_idc);
+    extradata.push(compatibility);
+    extradata.push(level_idc);
+    extradata.push(0xFF); // lengthSizeMinusOne (4 bytes)
+    extradata.push(0xE1); // numOfSequenceParameterSets = 1
+    extradata.extend_from_slice(&(sps.len() as u16).to_be_bytes());
+    extradata.extend_from_slice(sps);
+    extradata.push(1); // numOfPictureParameterSets = 1
+    extradata.extend_from_slice(&(pps.len() as u16).to_be_bytes());
+    extradata.extend_from_slice(pps);
+    extradata
+}
+
+fn parse_h264_sps_dimensions(sps: &[u8]) -> Option<(u32, u32)> {
+    if sps.len() < 4 {
+        return None;
+    }
+    let rbsp = remove_emulation_prevention_bytes(&sps[1..]);
+    let mut reader = BitReader::new(&rbsp);
+    let profile_idc = reader.read_bits(8)? as u8;
+    reader.read_bits(8)?;
+    reader.read_bits(8)?;
+    reader.read_ue()?;
+    let mut chroma_format_idc = 1u32;
+    if matches!(
+        profile_idc,
+        100 | 110 | 122 | 244 | 44 | 83 | 86 | 118 | 128 | 138 | 139 | 134
+    ) {
+        chroma_format_idc = reader.read_ue()?;
+        if chroma_format_idc == 3 {
+            reader.read_bits(1)?;
+        }
+        reader.read_ue()?;
+        reader.read_ue()?;
+        reader.read_bits(1)?;
+        let seq_scaling_matrix_present_flag = reader.read_bits(1)?;
+        if seq_scaling_matrix_present_flag == 1 {
+            let scaling_list_count = if chroma_format_idc == 3 { 12 } else { 8 };
+            for i in 0..scaling_list_count {
+                let scaling_list_present = reader.read_bits(1)?;
+                if scaling_list_present == 1 {
+                    skip_scaling_list(&mut reader, if i < 6 { 16 } else { 64 })?;
+                }
+            }
+        }
+    }
+    reader.read_ue()?;
+    let pic_order_cnt_type = reader.read_ue()?;
+    if pic_order_cnt_type == 0 {
+        reader.read_ue()?;
+    } else if pic_order_cnt_type == 1 {
+        reader.read_bits(1)?;
+        reader.read_se()?;
+        reader.read_se()?;
+        let num_ref_frames_in_pic_order_cnt_cycle = reader.read_ue()?;
+        for _ in 0..num_ref_frames_in_pic_order_cnt_cycle {
+            reader.read_se()?;
+        }
+    }
+    reader.read_ue()?;
+    reader.read_bits(1)?;
+    let pic_width_in_mbs_minus1 = reader.read_ue()?;
+    let pic_height_in_map_units_minus1 = reader.read_ue()?;
+    let frame_mbs_only_flag = reader.read_bits(1)?;
+    if frame_mbs_only_flag == 0 {
+        reader.read_bits(1)?;
+    }
+    reader.read_bits(1)?;
+    let frame_cropping_flag = reader.read_bits(1)?;
+    let mut frame_crop_left = 0u32;
+    let mut frame_crop_right = 0u32;
+    let mut frame_crop_top = 0u32;
+    let mut frame_crop_bottom = 0u32;
+    if frame_cropping_flag == 1 {
+        frame_crop_left = reader.read_ue()?;
+        frame_crop_right = reader.read_ue()?;
+        frame_crop_top = reader.read_ue()?;
+        frame_crop_bottom = reader.read_ue()?;
+    }
+    let width = (pic_width_in_mbs_minus1 + 1) * 16;
+    let mut height = (pic_height_in_map_units_minus1 + 1) * 16;
+    if frame_mbs_only_flag == 0 {
+        height *= 2;
+    }
+    let crop_unit_x = match chroma_format_idc {
+        0 | 3 => 1,
+        _ => 2,
+    };
+    let crop_unit_y = match chroma_format_idc {
+        0 | 3 => 2 - frame_mbs_only_flag,
+        _ => 2 * (2 - frame_mbs_only_flag),
+    };
+    let width = width.saturating_sub((frame_crop_left + frame_crop_right) * crop_unit_x);
+    let height = height.saturating_sub((frame_crop_top + frame_crop_bottom) * crop_unit_y);
+    Some((width, height))
+}
+
+fn remove_emulation_prevention_bytes(data: &[u8]) -> Vec<u8> {
+    let mut cleaned = Vec::with_capacity(data.len());
+    let mut i = 0;
+    while i < data.len() {
+        if i + 2 < data.len() && data[i] == 0 && data[i + 1] == 0 && data[i + 2] == 3 {
+            cleaned.push(0);
+            cleaned.push(0);
+            i += 3;
+            continue;
+        }
+        cleaned.push(data[i]);
+        i += 1;
+    }
+    cleaned
+}
+
+struct BitReader<'a> {
+    data: &'a [u8],
+    bit_pos: usize,
+}
+
+impl<'a> BitReader<'a> {
+    fn new(data: &'a [u8]) -> Self {
+        Self { data, bit_pos: 0 }
+    }
+
+    fn read_bits(&mut self, count: usize) -> Option<u32> {
+        let mut value = 0u32;
+        for _ in 0..count {
+            value <<= 1;
+            value |= self.read_bit()? as u32;
+        }
+        Some(value)
+    }
+
+    fn read_bit(&mut self) -> Option<u8> {
+        let byte_pos = self.bit_pos / 8;
+        if byte_pos >= self.data.len() {
+            return None;
+        }
+        let bit_offset = 7 - (self.bit_pos % 8);
+        let bit = (self.data[byte_pos] >> bit_offset) & 1;
+        self.bit_pos += 1;
+        Some(bit)
+    }
+
+    fn read_ue(&mut self) -> Option<u32> {
+        let mut zeros = 0usize;
+        while self.read_bit()? == 0 {
+            zeros += 1;
+        }
+        let mut value = 0u32;
+        if zeros > 0 {
+            value = self.read_bits(zeros)?;
+        }
+        Some((1u32 << zeros) - 1 + value)
+    }
+
+    fn read_se(&mut self) -> Option<i32> {
+        let code_num = self.read_ue()? as i32;
+        let sign = if code_num % 2 == 0 { -1 } else { 1 };
+        Some(((code_num + 1) / 2) * sign)
+    }
+}
+
+fn skip_scaling_list(reader: &mut BitReader<'_>, size: usize) -> Option<()> {
+    let mut last_scale = 8i32;
+    let mut next_scale = 8i32;
+    for _ in 0..size {
+        if next_scale != 0 {
+            let delta_scale = reader.read_se()?;
+            next_scale = (last_scale + delta_scale + 256) % 256;
+        }
+        last_scale = if next_scale == 0 {
+            last_scale
+        } else {
+            next_scale
+        };
+    }
+    Some(())
 }
 
 fn fallback_chunking(data: &[u8], max_chunk_size: u64) -> Vec<ChunkWithMeta> {

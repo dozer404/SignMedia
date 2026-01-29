@@ -22,6 +22,20 @@ pub struct AuthorMetadata {
 pub struct TrackMetadata {
     pub track_id: u32,
     pub codec: String,
+    #[serde(default)]
+    pub codec_extradata: Option<String>, // Hex encoded
+    #[serde(default)]
+    pub width: Option<u32>,
+    #[serde(default)]
+    pub height: Option<u32>,
+    #[serde(default)]
+    pub sample_rate: Option<u32>,
+    #[serde(default)]
+    pub channel_count: Option<u16>,
+    #[serde(default)]
+    pub timebase_num: Option<u32>,
+    #[serde(default)]
+    pub timebase_den: Option<u32>,
     pub merkle_root: String,             // Hex encoded
     pub perceptual_hash: Option<String>, // Hex encoded
     pub total_chunks: u64,
