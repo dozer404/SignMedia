@@ -6,3 +6,4 @@
 *.avi
 *.mkv
 *.smed
+.env
