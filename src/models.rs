@@ -7,6 +7,7 @@ pub struct OriginalWorkDescriptor {
     pub work_id: Uuid,
     pub title: String,
     pub authors: Vec<AuthorMetadata>,
+    pub authorship_fingerprint: Option<String>, // Hex encoded BLAKE3 hash of authors
     pub created_at: DateTime<Utc>,
     pub tracks: Vec<TrackMetadata>,
 }
@@ -60,6 +61,7 @@ pub struct DerivativeWorkDescriptor {
     #[serde(default)]
     pub ancestry: Vec<SignedManifest>,
     pub clipper_id: String, // public key hex
+    pub authorship_fingerprint: Option<String>,
     pub created_at: DateTime<Utc>,
     pub clip_mappings: Vec<ClipMapping>,
 }

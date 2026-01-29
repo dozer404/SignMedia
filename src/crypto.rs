@@ -144,6 +144,28 @@ pub fn generate_keypair() -> SigningKey {
     SigningKey::generate(&mut csprng)
 }
 
+pub const TTP_PUBLIC_KEY: &str = "92f2beb2bf58b85302ca00dab45efcbb74a3bfd8ed9a13966f8538f40c0b3e55";
+
+pub fn sign_with_ttp(data: &[u8], signing_key: &SigningKey) -> Signature {
+    signing_key.sign(data)
+}
+
+pub fn compute_authorship_fingerprint(authors: &[crate::models::AuthorMetadata]) -> String {
+    let mut hasher = Hasher::new();
+    for author in authors {
+        hasher.update(author.author_id.as_bytes());
+        hasher.update(author.name.as_bytes());
+        hasher.update(author.role.as_bytes());
+    }
+    hex::encode(hasher.finalize().as_bytes())
+}
+
+pub fn compute_derivative_fingerprint(clipper_id: &str) -> String {
+    let mut hasher = Hasher::new();
+    hasher.update(clipper_id.as_bytes());
+    hex::encode(hasher.finalize().as_bytes())
+}
+
 pub fn compute_perceptual_hash(data: &[u8]) -> Option<String> {
     // Treat data as a square grayscale image if possible
     let size = (data.len() as f64).sqrt() as u32;

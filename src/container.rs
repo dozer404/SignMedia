@@ -495,6 +495,7 @@ mod tests {
                 work_id: Uuid::new_v4(),
                 title: "Test".to_string(),
                 authors: vec![],
+                authorship_fingerprint: None,
                 created_at: Utc::now(),
                 tracks: vec![crate::models::TrackMetadata {
                     track_id: 0,
@@ -527,6 +528,7 @@ mod tests {
                 work_id: Uuid::new_v4(),
                 title: "Test".to_string(),
                 authors: vec![],
+                authorship_fingerprint: None,
                 created_at: Utc::now(),
                 tracks: vec![],
             }),
@@ -590,6 +592,7 @@ mod tests {
                 work_id: Uuid::new_v4(),
                 title: "Legacy".to_string(),
                 authors: vec![],
+                authorship_fingerprint: None,
                 created_at: Utc::now(),
                 tracks: vec![],
             }),
