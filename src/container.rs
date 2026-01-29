@@ -141,6 +141,8 @@ impl<W: Write> SmedWriter<W> {
             self.writer.write_all(chunk)?;
         }
 
+        self.writer.flush()?;
+
         Ok(())
     }
 }
@@ -159,7 +161,11 @@ impl<R: Read + Seek> SmedReader<R> {
         let mut magic = [0u8; 4];
         reader.read_exact(&mut magic)?;
         if &magic != MAGIC {
-            return Err(anyhow!("Invalid magic"));
+            return Err(anyhow!(
+                "Invalid magic: expected {:?}, got {:?}",
+                MAGIC,
+                magic
+            ));
         }
 
         let version = reader.read_u32::<LittleEndian>()?;
@@ -583,6 +589,16 @@ mod tests {
         assert_eq!(c2, b"world");
 
         Ok(())
+    }
+
+    #[test]
+    fn test_invalid_magic() {
+        let data = b"WRNG1234";
+        let reader = SmedReader::new(Cursor::new(data));
+        assert!(reader.is_err());
+        let err = reader.err().unwrap();
+        assert!(err.to_string().contains("Invalid magic"));
+        assert!(err.to_string().contains("[87, 82, 78, 71]"));
     }
 
     #[test]
