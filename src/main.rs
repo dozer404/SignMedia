@@ -1,4 +1,5 @@
 use anyhow::{anyhow, Context, Result};
+use base64::{engine::general_purpose, Engine as _};
 use chrono::Utc;
 use clap::{Parser, Subcommand};
 use ed25519_dalek::{Signature, SigningKey, VerifyingKey};
@@ -687,6 +688,99 @@ struct ExtractTrackOutput {
     path: PathBuf,
 }
 
+fn build_extract_metadata(manifest: &SignedManifest) -> Result<Vec<(String, String)>> {
+    let mut metadata = Vec::new();
+
+    let manifest_json = serde_json::to_vec(manifest)?;
+    let manifest_hash = crypto::hash_data(&manifest_json);
+    let content_hash = hash_manifest_content(&manifest.content)?;
+
+    metadata.push((
+        "smed.manifest_b64".to_string(),
+        general_purpose::STANDARD.encode(&manifest_json),
+    ));
+    metadata.push((
+        "smed.manifest_hash".to_string(),
+        hex::encode(manifest_hash),
+    ));
+    metadata.push((
+        "smed.content_hash".to_string(),
+        hex::encode(content_hash),
+    ));
+    metadata.push((
+        "smed.signature_count".to_string(),
+        manifest.signatures.len().to_string(),
+    ));
+
+    match &manifest.content {
+        ManifestContent::Original(owd) => {
+            metadata.push(("smed.type".to_string(), "original".to_string()));
+            metadata.push(("smed.work_id".to_string(), owd.work_id.to_string()));
+            metadata.push(("smed.title".to_string(), owd.title.clone()));
+            metadata.push((
+                "smed.created_at".to_string(),
+                owd.created_at.to_rfc3339(),
+            ));
+            metadata.push((
+                "smed.author_count".to_string(),
+                owd.authors.len().to_string(),
+            ));
+            metadata.push((
+                "smed.track_count".to_string(),
+                owd.tracks.len().to_string(),
+            ));
+            if let Some(fp) = &owd.authorship_fingerprint {
+                metadata.push((
+                    "smed.authorship_fingerprint".to_string(),
+                    fp.clone(),
+                ));
+            }
+        }
+        ManifestContent::Derivative(dwd) => {
+            metadata.push(("smed.type".to_string(), "derivative".to_string()));
+            metadata.push((
+                "smed.derivative_id".to_string(),
+                dwd.derivative_id.to_string(),
+            ));
+            metadata.push((
+                "smed.original_work_id".to_string(),
+                dwd.original_owd.work_id.to_string(),
+            ));
+            metadata.push((
+                "smed.original_title".to_string(),
+                dwd.original_owd.title.clone(),
+            ));
+            metadata.push(("smed.clipper_id".to_string(), dwd.clipper_id.clone()));
+            metadata.push((
+                "smed.created_at".to_string(),
+                dwd.created_at.to_rfc3339(),
+            ));
+            metadata.push((
+                "smed.ancestry_count".to_string(),
+                dwd.ancestry.len().to_string(),
+            ));
+            metadata.push((
+                "smed.clip_mapping_count".to_string(),
+                dwd.clip_mappings.len().to_string(),
+            ));
+            if let Some(fp) = &dwd.authorship_fingerprint {
+                metadata.push((
+                    "smed.derivative_fingerprint".to_string(),
+                    fp.clone(),
+                ));
+            }
+            if let Some(fp) = &dwd.original_owd.authorship_fingerprint {
+                metadata.push((
+                    "smed.original_authorship_fingerprint".to_string(),
+                    fp.clone(),
+                ));
+            }
+        }
+    }
+
+    Ok(metadata)
+}
+
 fn extract_raw_track_passthrough(
     reader: &mut SmedReader<fs::File>,
     track: &TrackMetadata,
@@ -748,14 +842,34 @@ fn extract_command(input: PathBuf, output: PathBuf) -> Result<()> {
         ));
     }
 
+    let metadata = build_extract_metadata(&reader.manifest)?;
+
     if track_ids.len() == 1 {
         let track_id = track_ids[0];
         let track = tracks_by_id
             .get(&track_id)
             .context(format!("Missing track metadata for track {}", track_id))?;
         if track.codec.eq_ignore_ascii_case("raw") {
-            extract_raw_track_passthrough(&mut reader, track, file_len, track_ids.len(), &output)?;
-            println!("Extracted raw track written to {:?}", output);
+            let temp_dir = std::env::temp_dir().join(format!("smed-extract-{}", Uuid::new_v4()));
+            fs::create_dir_all(&temp_dir).context("Failed to create temp directory")?;
+            let temp_path = temp_dir.join(format!("raw-track.{}", output_ext));
+            extract_raw_track_passthrough(
+                &mut reader,
+                track,
+                file_len,
+                track_ids.len(),
+                &temp_path,
+            )?;
+            let remux_result = remux_container_with_ffmpeg(
+                &temp_path,
+                &output,
+                &metadata,
+                &output_ext,
+            );
+            let _ = fs::remove_file(&temp_path);
+            let _ = fs::remove_dir(&temp_dir);
+            remux_result?;
+            println!("Extracted container written to {:?}", output);
             return Ok(());
         }
     }
@@ -800,7 +914,7 @@ fn extract_command(input: PathBuf, output: PathBuf) -> Result<()> {
         });
     }
 
-    mux_tracks_with_ffmpeg(&track_outputs, &output)?;
+    mux_tracks_with_ffmpeg(&track_outputs, &output, &metadata, &output_ext)?;
 
     for output in &track_outputs {
         let _ = fs::remove_file(&output.path);
@@ -845,17 +959,53 @@ fn codec_to_ffmpeg_format(codec: &str) -> Option<&'static str> {
     }
 }
 
-fn mux_tracks_with_ffmpeg(tracks: &[ExtractTrackOutput], output: &PathBuf) -> Result<()> {
+fn mux_tracks_with_ffmpeg(
+    tracks: &[ExtractTrackOutput],
+    output: &PathBuf,
+    metadata: &[(String, String)],
+    output_ext: &str,
+) -> Result<()> {
     let mut command = std::process::Command::new("ffmpeg");
     command.arg("-y");
     for track in tracks {
         command.arg("-f").arg(&track.format);
         command.arg("-i").arg(&track.path);
     }
+    if output_ext == "mp4" {
+        command.arg("-movflags").arg("use_metadata_tags");
+    }
+    for (key, value) in metadata {
+        command.arg("-metadata").arg(format!("{}={}", key, value));
+    }
     command.arg("-c").arg("copy").arg(output);
     let status = command
         .status()
         .context("Failed to invoke ffmpeg for muxing")?;
+    if !status.success() {
+        return Err(anyhow!("ffmpeg failed with status {}", status));
+    }
+    Ok(())
+}
+
+fn remux_container_with_ffmpeg(
+    input: &PathBuf,
+    output: &PathBuf,
+    metadata: &[(String, String)],
+    output_ext: &str,
+) -> Result<()> {
+    let mut command = std::process::Command::new("ffmpeg");
+    command.arg("-y");
+    command.arg("-i").arg(input);
+    if output_ext == "mp4" {
+        command.arg("-movflags").arg("use_metadata_tags");
+    }
+    for (key, value) in metadata {
+        command.arg("-metadata").arg(format!("{}={}", key, value));
+    }
+    command.arg("-c").arg("copy").arg(output);
+    let status = command
+        .status()
+        .context("Failed to invoke ffmpeg for container remux")?;
     if !status.success() {
         return Err(anyhow!("ffmpeg failed with status {}", status));
     }
