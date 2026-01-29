@@ -92,6 +92,7 @@ enum Commands {
 }
 
 fn main() -> Result<()> {
+    dotenvy::dotenv().ok();
     let cli = Cli::parse();
 
     match cli.command {
@@ -145,8 +146,9 @@ fn hash_manifest_content(content: &ManifestContent) -> Result<crypto::Hash> {
 fn verify_manifest_signatures(manifest: &SignedManifest, content_name: &str) -> Result<()> {
     let content_hash = hash_manifest_content(&manifest.content)?;
     let mut ttp_verified = false;
+    let ttp_pubkey = crypto::get_ttp_public_key();
     for sig_entry in &manifest.signatures {
-        if sig_entry.public_key == crypto::TTP_PUBLIC_KEY {
+        if sig_entry.public_key == ttp_pubkey {
             ttp_verified = true;
         }
         let pubkey_bytes = hex::decode(&sig_entry.public_key).context("Invalid public key hex")?;
@@ -231,16 +233,6 @@ fn build_sequential_entries(
             }
         })
         .collect()
-}
-
-fn get_ttp_key() -> Result<SigningKey> {
-    // In a real production system, this would be a hardware-backed key or a secure vault.
-    // For this implementation, we use an environment variable to simulate an embedded/trusted key.
-    let key_hex = std::env::var("SMED_TTP_PRIVATE_KEY")
-        .context("Missing TTP private key. Set SMED_TTP_PRIVATE_KEY environment variable.")?;
-    let key_bytes = hex::decode(key_hex).context("Invalid TTP key format")?;
-    let key_array: [u8; 32] = key_bytes.try_into().map_err(|_| anyhow!("Invalid TTP key size"))?;
-    Ok(SigningKey::from_bytes(&key_array))
 }
 
 fn resolve_track_entries<R: Read + Seek>(
@@ -370,7 +362,7 @@ fn sign_command(
     let author_signature = crypto::sign(&content_hash, &signing_key);
 
     // Attempt to get the TTP signer from environment
-    let ttp_signer = get_ttp_key()?;
+    let ttp_signer = crypto::get_ttp_signing_key()?;
     let ttp_signature = crypto::sign_with_ttp(&content_hash, &ttp_signer);
 
     let manifest = SignedManifest {
@@ -382,7 +374,7 @@ fn sign_command(
             },
             signmedia::models::SignatureEntry {
                 signature: hex::encode(ttp_signature.to_bytes()),
-                public_key: crypto::TTP_PUBLIC_KEY.to_string(),
+                public_key: crypto::get_ttp_public_key(),
             },
         ],
     };
@@ -1014,7 +1006,7 @@ fn clip_command(
         let content_hash = hash_manifest_content(&content)?;
         let signature = crypto::sign(&content_hash, &signing_key);
 
-        let ttp_signer = get_ttp_key()?;
+        let ttp_signer = crypto::get_ttp_signing_key()?;
         let ttp_signature = crypto::sign_with_ttp(&content_hash, &ttp_signer);
         let manifest = SignedManifest {
             content,
@@ -1025,7 +1017,7 @@ fn clip_command(
                 },
                 signmedia::models::SignatureEntry {
                     signature: hex::encode(ttp_signature.to_bytes()),
-                    public_key: crypto::TTP_PUBLIC_KEY.to_string(),
+                    public_key: crypto::get_ttp_public_key(),
                 },
             ],
         };
@@ -1090,7 +1082,7 @@ fn clip_command(
     let content_hash = hash_manifest_content(&content)?;
     let author_signature = crypto::sign(&content_hash, &signing_key);
 
-    let ttp_signer = get_ttp_key()?;
+    let ttp_signer = crypto::get_ttp_signing_key()?;
     let ttp_signature = crypto::sign_with_ttp(&content_hash, &ttp_signer);
     let manifest = SignedManifest {
         content,
@@ -1101,7 +1093,7 @@ fn clip_command(
             },
             signmedia::models::SignatureEntry {
                 signature: hex::encode(ttp_signature.to_bytes()),
-                public_key: crypto::TTP_PUBLIC_KEY.to_string(),
+                public_key: crypto::get_ttp_public_key(),
             },
         ],
     };
