@@ -144,7 +144,11 @@ fn hash_manifest_content(content: &ManifestContent) -> Result<crypto::Hash> {
 
 fn verify_manifest_signatures(manifest: &SignedManifest, content_name: &str) -> Result<()> {
     let content_hash = hash_manifest_content(&manifest.content)?;
+    let mut ttp_verified = false;
     for sig_entry in &manifest.signatures {
+        if sig_entry.public_key == crypto::TTP_PUBLIC_KEY {
+            ttp_verified = true;
+        }
         let pubkey_bytes = hex::decode(&sig_entry.public_key).context("Invalid public key hex")?;
         let verifying_key = VerifyingKey::from_bytes(
             &pubkey_bytes
@@ -171,6 +175,15 @@ fn verify_manifest_signatures(manifest: &SignedManifest, content_name: &str) -> 
             content_name, sig_entry.public_key
         );
     }
+
+    if !ttp_verified {
+        return Err(anyhow!(
+            "Missing Trusted Third Party (TTP) signature for {}!",
+            content_name
+        ));
+    }
+    println!("Trusted Third Party (TTP) oversight verified for {}.", content_name);
+
     Ok(())
 }
 
@@ -218,6 +231,16 @@ fn build_sequential_entries(
             }
         })
         .collect()
+}
+
+fn get_ttp_key() -> Result<SigningKey> {
+    // In a real production system, this would be a hardware-backed key or a secure vault.
+    // For this implementation, we use an environment variable to simulate an embedded/trusted key.
+    let key_hex = std::env::var("SMED_TTP_PRIVATE_KEY")
+        .context("Missing TTP private key. Set SMED_TTP_PRIVATE_KEY environment variable.")?;
+    let key_bytes = hex::decode(key_hex).context("Invalid TTP key format")?;
+    let key_array: [u8; 32] = key_bytes.try_into().map_err(|_| anyhow!("Invalid TTP key size"))?;
+    Ok(SigningKey::from_bytes(&key_array))
 }
 
 fn resolve_track_entries<R: Read + Seek>(
@@ -324,14 +347,19 @@ fn sign_command(
         all_chunks.extend(current_track_chunks);
     }
 
+    let authors = vec![signmedia::models::AuthorMetadata {
+        author_id: hex::encode(signing_key.verifying_key().to_bytes()),
+        name: "Default Author".to_string(),
+        role: "Creator".to_string(),
+    }];
+
+    let authorship_fingerprint = Some(crypto::compute_authorship_fingerprint(&authors));
+
     let owd = OriginalWorkDescriptor {
         work_id: Uuid::new_v4(),
         title,
-        authors: vec![signmedia::models::AuthorMetadata {
-            author_id: hex::encode(signing_key.verifying_key().to_bytes()),
-            name: "Default Author".to_string(),
-            role: "Creator".to_string(),
-        }],
+        authors,
+        authorship_fingerprint,
         created_at: Utc::now(),
         tracks: track_metadata,
     };
@@ -339,14 +367,24 @@ fn sign_command(
     let content = ManifestContent::Original(owd);
     let content_hash = hash_manifest_content(&content)?;
 
-    let signature = crypto::sign(&content_hash, &signing_key);
+    let author_signature = crypto::sign(&content_hash, &signing_key);
+
+    // Attempt to get the TTP signer from environment
+    let ttp_signer = get_ttp_key()?;
+    let ttp_signature = crypto::sign_with_ttp(&content_hash, &ttp_signer);
 
     let manifest = SignedManifest {
         content,
-        signatures: vec![signmedia::models::SignatureEntry {
-            signature: hex::encode(signature.to_bytes()),
-            public_key: hex::encode(signing_key.verifying_key().to_bytes()),
-        }],
+        signatures: vec![
+            signmedia::models::SignatureEntry {
+                signature: hex::encode(author_signature.to_bytes()),
+                public_key: hex::encode(signing_key.verifying_key().to_bytes()),
+            },
+            signmedia::models::SignatureEntry {
+                signature: hex::encode(ttp_signature.to_bytes()),
+                public_key: crypto::TTP_PUBLIC_KEY.to_string(),
+            },
+        ],
     };
 
     let out_file = fs::File::create(&output).context("Failed to create output file")?;
@@ -380,6 +418,21 @@ fn verify_command(input: PathBuf) -> Result<()> {
                     author.name, author.role, author.author_id
                 );
             }
+            if let Some(fp) = &owd.authorship_fingerprint {
+                println!("Authorship Fingerprint: {}", fp);
+            }
+
+            // Fingerprint check
+            if let Some(expected_fingerprint) = &owd.authorship_fingerprint {
+                let actual_fingerprint = crypto::compute_authorship_fingerprint(&owd.authors);
+                if expected_fingerprint != &actual_fingerprint {
+                    return Err(anyhow!("CRITICAL: Authorship metadata mismatch with fingerprint! Evidence of tampering."));
+                }
+                println!("Authorship fingerprint verified.");
+            } else {
+                println!("Warning: No authorship fingerprint found in metadata.");
+            }
+
             for track in &owd.tracks {
                 println!("Verifying integrity for track {}...", track.track_id);
                 if let Some(p_hash) = &track.perceptual_hash {
@@ -404,6 +457,17 @@ fn verify_command(input: PathBuf) -> Result<()> {
             }
         }
         ManifestContent::Derivative(dwd) => {
+            // Fingerprint check
+            if let Some(expected_fingerprint) = &dwd.authorship_fingerprint {
+                let actual_fingerprint = crypto::compute_derivative_fingerprint(&dwd.clipper_id);
+                if expected_fingerprint != &actual_fingerprint {
+                    return Err(anyhow!("CRITICAL: Derivative authorship metadata mismatch with fingerprint! Evidence of tampering."));
+                }
+                println!("Derivative authorship fingerprint verified.");
+            } else {
+                println!("Warning: No derivative authorship fingerprint found in metadata.");
+            }
+
             println!("\n[PROVENANCE CHAIN]");
             println!("  (Original: {})", dwd.original_owd.title);
             for (i, ancestor) in dwd.ancestry.iter().enumerate() {
@@ -593,6 +657,9 @@ fn info_command(input: PathBuf) -> Result<()> {
             println!("  Authors:");
             for author in &dwd.original_owd.authors {
                 println!("    - {} ({})", author.name, author.role);
+            }
+            if let Some(fp) = &dwd.authorship_fingerprint {
+                println!("  Derivative Fingerprint: {}", fp);
             }
             println!("Ancestry: {} levels", dwd.ancestry.len());
             println!("Clip Mappings: {}", dwd.clip_mappings.len());
@@ -822,6 +889,9 @@ fn clip_command(
     let mut reader = SmedReader::new(file).context("Failed to initialize SmedReader")?;
 
     let original_manifest = reader.manifest.clone();
+
+    // Enforce TTP oversight for clipping
+    verify_manifest_signatures(&original_manifest, "Input manifest for clipping")?;
     let mut ancestry = Vec::new();
     let (original_owd, original_signature, source_mapping, source_proofs) =
         match &original_manifest.content {
@@ -922,12 +992,15 @@ fn clip_command(
             .unwrap_or(mapping.end_chunk_index.saturating_sub(1));
         let start = first_index;
         let end = last_index + 1;
+        let clipper_id = hex::encode(signing_key.verifying_key().to_bytes());
+        let authorship_fingerprint = Some(crypto::compute_derivative_fingerprint(&clipper_id));
         let dwd = signmedia::models::DerivativeWorkDescriptor {
             derivative_id: Uuid::new_v4(),
             original_owd,
             original_signature,
             ancestry,
-            clipper_id: hex::encode(signing_key.verifying_key().to_bytes()),
+            clipper_id,
+            authorship_fingerprint,
             created_at: Utc::now(),
             clip_mappings: vec![signmedia::models::ClipMapping {
                 track_id: mapping.track_id,
@@ -941,12 +1014,20 @@ fn clip_command(
         let content_hash = hash_manifest_content(&content)?;
         let signature = crypto::sign(&content_hash, &signing_key);
 
+        let ttp_signer = get_ttp_key()?;
+        let ttp_signature = crypto::sign_with_ttp(&content_hash, &ttp_signer);
         let manifest = SignedManifest {
             content,
-            signatures: vec![signmedia::models::SignatureEntry {
-                signature: hex::encode(signature.to_bytes()),
-                public_key: hex::encode(signing_key.verifying_key().to_bytes()),
-            }],
+            signatures: vec![
+                signmedia::models::SignatureEntry {
+                    signature: hex::encode(signature.to_bytes()),
+                    public_key: hex::encode(signing_key.verifying_key().to_bytes()),
+                },
+                signmedia::models::SignatureEntry {
+                    signature: hex::encode(ttp_signature.to_bytes()),
+                    public_key: crypto::TTP_PUBLIC_KEY.to_string(),
+                },
+            ],
         };
 
         let (track_table, chunk_table) =
@@ -987,12 +1068,15 @@ fn clip_command(
         proofs.push(proof);
     }
 
+    let clipper_id = hex::encode(signing_key.verifying_key().to_bytes());
+    let authorship_fingerprint = Some(crypto::compute_derivative_fingerprint(&clipper_id));
     let dwd = signmedia::models::DerivativeWorkDescriptor {
         derivative_id: Uuid::new_v4(),
         original_owd,
         original_signature,
         ancestry,
-        clipper_id: hex::encode(signing_key.verifying_key().to_bytes()),
+        clipper_id,
+        authorship_fingerprint,
         created_at: Utc::now(),
         clip_mappings: vec![signmedia::models::ClipMapping {
             track_id,
@@ -1004,14 +1088,22 @@ fn clip_command(
 
     let content = ManifestContent::Derivative(dwd);
     let content_hash = hash_manifest_content(&content)?;
-    let signature = crypto::sign(&content_hash, &signing_key);
+    let author_signature = crypto::sign(&content_hash, &signing_key);
 
+    let ttp_signer = get_ttp_key()?;
+    let ttp_signature = crypto::sign_with_ttp(&content_hash, &ttp_signer);
     let manifest = SignedManifest {
         content,
-        signatures: vec![signmedia::models::SignatureEntry {
-            signature: hex::encode(signature.to_bytes()),
-            public_key: hex::encode(signing_key.verifying_key().to_bytes()),
-        }],
+        signatures: vec![
+            signmedia::models::SignatureEntry {
+                signature: hex::encode(author_signature.to_bytes()),
+                public_key: hex::encode(signing_key.verifying_key().to_bytes()),
+            },
+            signmedia::models::SignatureEntry {
+                signature: hex::encode(ttp_signature.to_bytes()),
+                public_key: crypto::TTP_PUBLIC_KEY.to_string(),
+            },
+        ],
     };
 
     let (track_table, chunk_table) = build_track_tables(track_id, &proofs, &clip_chunks)?;
