@@ -202,6 +202,10 @@ Sign a file and create a `.smed` container:
 
     clip original.smed     --start 10 --end 25     --editor-key editor.key     --output clip.smed
 
+## Get smed info
+
+    info --input original.smed
+
 ### Trusted Third Party (TTP) Setup
 
 SignMedia now requires a multi-signature for all operations (Original signing and Clipping). This is handled by a Trusted Third Party (TTP) key.
@@ -210,7 +214,11 @@ For this POC, the TTP public key is hardcoded. To perform signing or clipping, y
 
 Format for `.env` or environment:
 ```bash
-SMED_TTP_PRIVATE_KEY=75c0ccc4e5e622903896f7edfd6fa668caab3d789331041510117cf919e4a433
+# Hex-encoded 32-byte Ed25519 private key
+SMED_TTP_PRIVATE_KEY=0000000000000000000000000000000000000000000000000000000000000000
+
+# Hex-encoded 32-byte Ed25519 public key
+SMED_TTP_PUBLIC_KEY=92f2beb2bf58b85302ca00dab45efcbb74a3bfd8ed9a13966f8538f40c0b3e55
 ```
 (The value must be a 64-character hex-encoded string representing the 32-byte Ed25519 private key).
 
