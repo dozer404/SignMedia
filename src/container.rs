@@ -115,6 +115,13 @@ impl<W: Write> SmedWriter<W> {
         .write(&mut self.writer)?;
         self.writer.write_all(&track_table_payload)?;
 
+        let generated_chunk_table;
+        let chunk_table = if chunk_table.is_empty() {
+            generated_chunk_table = build_chunk_table_from_tracks(track_table, chunks)?;
+            &generated_chunk_table
+        } else {
+            chunk_table
+        };
         let chunk_table_payload = encode_chunk_table(chunk_table)?;
         SectionHeader {
             section_type: SECTION_TYPE_INDEX_DATA,
@@ -287,6 +294,40 @@ fn skip_bytes<R: Read + Seek>(reader: &mut R, length: u64) -> Result<()> {
     }
     reader.seek(SeekFrom::Current(length as i64))?;
     Ok(())
+}
+
+fn build_chunk_table_from_tracks(
+    track_table: &[TrackTableEntry],
+    chunks: &[Vec<u8>],
+) -> Result<Vec<ChunkTableEntry>> {
+    if track_table.is_empty() && !chunks.is_empty() {
+        return Err(anyhow!("Cannot build chunk index without track metadata"));
+    }
+    let mut entries = Vec::new();
+    let mut offset = 0u64;
+    let mut chunk_iter = chunks.iter();
+    for track in track_table {
+        for chunk_index in 0..track.total_chunks {
+            let chunk = chunk_iter
+                .next()
+                .ok_or_else(|| anyhow!("Track data missing for chunk index generation"))?;
+            let size = chunk.len() as u64;
+            entries.push(ChunkTableEntry {
+                track_id: track.track_id,
+                chunk: TrackChunkIndexEntry {
+                    chunk_index,
+                    pts: None,
+                    offset,
+                    size,
+                },
+            });
+            offset = offset.saturating_add(size);
+        }
+    }
+    if chunk_iter.next().is_some() {
+        return Err(anyhow!("Extra chunk data without matching track metadata"));
+    }
+    Ok(entries)
 }
 
 fn encode_track_table(entries: &[TrackTableEntry]) -> Result<Vec<u8>> {

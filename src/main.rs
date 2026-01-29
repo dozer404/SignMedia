@@ -8,7 +8,7 @@ use signmedia::models::{
     ManifestContent, OriginalWorkDescriptor, SignedManifest, TrackChunkIndexEntry, TrackMetadata,
 };
 use std::fs;
-use std::io::{BufReader, Read};
+use std::io::{BufReader, Read, Seek};
 use std::path::PathBuf;
 use uuid::Uuid;
 
@@ -184,6 +184,46 @@ fn verify_original_signature(owd: &OriginalWorkDescriptor, signature_hex: &str) 
     Ok(())
 }
 
+fn build_sequential_entries(
+    total_chunks: u64,
+    chunk_size: u64,
+    data_size: u64,
+) -> Vec<TrackChunkIndexEntry> {
+    (0..total_chunks)
+        .map(|i| {
+            let offset = i * chunk_size;
+            let size = if offset + chunk_size > data_size {
+                data_size.saturating_sub(offset)
+            } else {
+                chunk_size
+            };
+            TrackChunkIndexEntry {
+                chunk_index: i,
+                pts: None,
+                offset,
+                size,
+            }
+        })
+        .collect()
+}
+
+fn resolve_track_entries<R: Read + Seek>(
+    reader: &SmedReader<R>,
+    track: &TrackMetadata,
+    file_len: u64,
+) -> Vec<TrackChunkIndexEntry> {
+    if let Some(entries) = reader.chunk_index_for_track(track.track_id) {
+        if !entries.is_empty() {
+            return entries.clone();
+        }
+    }
+    if !track.chunk_index.is_empty() {
+        return track.chunk_index.clone();
+    }
+    let data_size = file_len - reader.data_start();
+    build_sequential_entries(track.total_chunks, track.chunk_size, data_size)
+}
+
 fn sign_command(
     inputs: Vec<PathBuf>,
     key_path: PathBuf,
@@ -333,28 +373,9 @@ fn verify_command(input: PathBuf) -> Result<()> {
                     println!("Track Perceptual Hash (Watermark): {}", p_hash);
                 }
                 let mut chunk_hashes = Vec::new();
-                // For v1, we assume sequential storage of tracks.
-                // Since there's only one track, it's easy.
-                let mut entries = track.chunk_index.clone();
-                if entries.is_empty() {
-                    let data_size = file_len - reader.data_start();
-                    for i in 0..track.total_chunks {
-                        let offset = i * track.chunk_size;
-                        let size = if offset + track.chunk_size > data_size {
-                            data_size - offset
-                        } else {
-                            track.chunk_size
-                        };
-                        entries.push(TrackChunkIndexEntry {
-                            chunk_index: i,
-                            pts: None,
-                            offset,
-                            size,
-                        });
-                    }
-                } else {
-                    entries.sort_by_key(|entry| entry.chunk_index);
-                }
+                // Prefer container chunk index for fast seeking; fall back to manifest or sequential.
+                let mut entries = resolve_track_entries(&reader, track, file_len);
+                entries.sort_by_key(|entry| entry.chunk_index);
                 for entry in entries {
                     let chunk = reader.read_variable_chunk(entry.offset, entry.size)?;
                     chunk_hashes.push(crypto::hash_data(&chunk));
@@ -634,22 +655,17 @@ fn clip_command(
             }
         };
 
-    let (track_id, total_chunks, chunk_size_orig, track_index) = {
-        let track = original_owd
-            .tracks
-            .iter()
-            .find(|t| t.track_id == track_id_to_clip)
-            .context(format!(
-                "Track {} not found in original work",
-                track_id_to_clip
-            ))?;
-        (
-            track.track_id,
-            track.total_chunks,
-            track.chunk_size,
-            track.chunk_index.clone(),
-        )
-    };
+    let track = original_owd
+        .tracks
+        .iter()
+        .find(|t| t.track_id == track_id_to_clip)
+        .context(format!(
+            "Track {} not found in original work",
+            track_id_to_clip
+        ))?
+        .clone();
+    let track_id = track.track_id;
+    let total_chunks = track.total_chunks;
 
     let mut clip_chunks = Vec::new();
     let mut proofs = Vec::new();
@@ -759,29 +775,8 @@ fn clip_command(
 
     println!("Extracting original chunks and reconstructing Merkle tree...");
     let mut original_hashes = Vec::new();
-    let entries = if track_index.is_empty() {
-        let data_size = file_len - reader.data_start();
-        (0..total_chunks)
-            .map(|i| {
-                let offset = i * chunk_size_orig;
-                let size = if offset + chunk_size_orig > data_size {
-                    data_size - offset
-                } else {
-                    chunk_size_orig
-                };
-                TrackChunkIndexEntry {
-                    chunk_index: i,
-                    pts: None,
-                    offset,
-                    size,
-                }
-            })
-            .collect::<Vec<_>>()
-    } else {
-        let mut entries = track_index;
-        entries.sort_by_key(|entry| entry.chunk_index);
-        entries
-    };
+    let mut entries = resolve_track_entries(&reader, &track, file_len);
+    entries.sort_by_key(|entry| entry.chunk_index);
     for entry in &entries {
         let chunk = reader.read_variable_chunk(entry.offset, entry.size)?;
         original_hashes.push(crypto::hash_data(&chunk));
