@@ -50,7 +50,7 @@ impl MerkleTree {
         *self.nodes.last().unwrap().first().unwrap()
     }
 
-    pub fn generate_proof(&self, index: usize) -> MerkleProof {
+    pub fn generate_proof(&self, index: usize, pts: Option<i64>) -> MerkleProof {
         let mut path = Vec::new();
         let mut current_index = index;
         let leaf_hash = hex::encode(self.nodes[0][index]);
@@ -78,6 +78,7 @@ impl MerkleTree {
             hash: leaf_hash,
             path,
             chunk_size: 0,
+            pts,
         }
     }
 }
@@ -217,7 +218,7 @@ mod tests {
         let root = tree.root();
 
         for i in 0..leaves.len() {
-            let proof = tree.generate_proof(i);
+            let proof = tree.generate_proof(i, None);
             assert!(verify_proof(root, &proof));
         }
     }
@@ -233,7 +234,7 @@ mod tests {
         let root = tree.root();
 
         for i in 0..leaves.len() {
-            let proof = tree.generate_proof(i);
+            let proof = tree.generate_proof(i, None);
             assert!(verify_proof(root, &proof));
         }
     }

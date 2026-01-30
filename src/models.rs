@@ -83,6 +83,8 @@ pub struct MerkleProof {
     pub hash: String,
     pub path: Vec<ProofStep>,
     pub chunk_size: u64,
+    #[serde(default)]
+    pub pts: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
