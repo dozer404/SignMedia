@@ -56,12 +56,6 @@ enum Commands {
         #[arg(short, long, default_value_t = 1048576)] // 1MB
         chunk_size: u64,
     },
-    /// Verify a .smed file
-    Verify {
-        /// Input .smed file
-        #[arg(short, long)]
-        input: PathBuf,
-    },
     /// Create a clip from a .smed file
     Clip {
         /// Input .smed file
@@ -92,8 +86,9 @@ enum Commands {
         #[arg(long, default_value_t = 0)]
         track: u32,
     },
-    /// Show information about a .smed file
-    Info {
+    /// Show information and verify cryptographic integrity of a .smed file
+    #[command(name = "verify-smed", alias = "VERIFY-SMED")]
+    VerifySmed {
         /// Input .smed file
         #[arg(short, long)]
         input: PathBuf,
@@ -148,9 +143,6 @@ fn main() -> Result<()> {
                 chunk_size,
             )?;
         }
-        Commands::Verify { input } => {
-            verify_command(input)?;
-        }
         Commands::Clip {
             input,
             key,
@@ -174,8 +166,8 @@ fn main() -> Result<()> {
                 track,
             )?;
         }
-        Commands::Info { input } => {
-            info_command(input)?;
+        Commands::VerifySmed { input } => {
+            verify_smed_command(input)?;
         }
         Commands::Extract { input, output } => {
             extract_command(input, output)?;
@@ -303,6 +295,20 @@ fn resolve_track_entries<R: Read + Seek>(
     }
     let data_size = file_len - reader.data_start();
     build_sequential_entries(track.total_chunks, track.chunk_size, data_size)
+}
+
+fn open_smed_reader(input: &PathBuf) -> Result<SmedReader<fs::File>> {
+    let file = fs::File::open(input).with_context(|| format!("Failed to open file {:?}", input))?;
+    SmedReader::new(file).map_err(|e| {
+        if e.to_string().contains("Invalid magic") {
+            anyhow!(
+                "'{}' is not a valid SignMedia (.smed) container. If you are trying to verify an extracted and tagged media file, use 'verify-metadata' instead.",
+                input.display()
+            )
+        } else {
+            e.context("Failed to initialize SmedReader")
+        }
+    })
 }
 
 fn find_idr_start<R: Read + Seek>(
@@ -479,11 +485,7 @@ fn sign_command(
     Ok(())
 }
 
-fn verify_command(input: PathBuf) -> Result<()> {
-    let file = fs::File::open(&input).context("Failed to open file")?;
-    let file_len = file.metadata()?.len();
-    let mut reader = SmedReader::new(file).context("Failed to initialize SmedReader")?;
-
+fn verify_smed_integrity<R: Read + Seek>(reader: &mut SmedReader<R>, file_len: u64) -> Result<()> {
     let manifest = reader.manifest.clone();
 
     let content_name = match &manifest.content {
@@ -701,10 +703,7 @@ fn verify_command(input: PathBuf) -> Result<()> {
     Ok(())
 }
 
-fn info_command(input: PathBuf) -> Result<()> {
-    let file = fs::File::open(&input).context("Failed to open file")?;
-    let reader = SmedReader::new(file).context("Failed to initialize SmedReader")?;
-
+fn print_smed_info<R: Read + Seek>(reader: &SmedReader<R>, input: &PathBuf) -> Result<()> {
     println!("--- SignMedia File Information ---");
     println!("File: {:?}", input);
 
@@ -829,7 +828,13 @@ fn verify_metadata_command(input: PathBuf) -> Result<()> {
         .output()
         .context("Failed to invoke ffprobe")?;
     if !output.status.success() {
-        return Err(anyhow!("ffprobe failed with status {}", output.status));
+        if input.extension().map_or(false, |ext| ext == "smed") {
+            return Err(anyhow!("ffprobe failed to read '{}'. This appears to be a .smed container; use 'VERIFY-SMED' instead.", input.display()));
+        }
+        return Err(anyhow!(
+            "ffprobe failed with status {}. Ensure the input is a valid media file.",
+            output.status
+        ));
     }
 
     #[derive(serde::Deserialize)]
@@ -853,10 +858,18 @@ fn verify_metadata_command(input: PathBuf) -> Result<()> {
         normalized.insert(key.to_ascii_lowercase(), value);
     }
 
-    let manifest_b64 = normalized
-        .get("smed.manifest_b64")
-        .ok_or_else(|| anyhow!("Missing smed.manifest_b64 tag"))?
-        .to_string();
+    let manifest_b64 = normalized.get("smed.manifest_b64").ok_or_else(|| {
+        let mut msg = format!(
+            "No SignMedia metadata found in '{}'. This file has not been tagged.",
+            input.display()
+        );
+        if input.extension().map_or(false, |ext| ext == "smed") {
+            msg.push_str("\nThis appears to be a .smed container. Use 'VERIFY-SMED' instead.");
+        } else {
+            msg.push_str("\nUse 'sign' to create a .smed container or 'extract' to create a tagged media file from a .smed container.");
+        }
+        anyhow!(msg)
+    })?.to_string();
     let manifest_bytes = general_purpose::STANDARD
         .decode(manifest_b64.as_bytes())
         .context("Failed to decode smed.manifest_b64")?;
@@ -1103,10 +1116,20 @@ fn extract_raw_track_passthrough(
     Ok(())
 }
 
+fn verify_smed_command(input: PathBuf) -> Result<()> {
+    let file_len = fs::metadata(&input)?.len();
+    let mut reader = open_smed_reader(&input)?;
+
+    print_smed_info(&reader, &input)?;
+    println!("\n--- Cryptographic Verification ---");
+    verify_smed_integrity(&mut reader, file_len)?;
+
+    Ok(())
+}
+
 fn extract_command(input: PathBuf, output: PathBuf) -> Result<()> {
-    let file = fs::File::open(&input).context("Failed to open file")?;
-    let file_len = file.metadata()?.len();
-    let mut reader = SmedReader::new(file).context("Failed to initialize SmedReader")?;
+    let file_len = fs::metadata(&input)?.len();
+    let mut reader = open_smed_reader(&input)?;
 
     let tracks = match &reader.manifest.content {
         ManifestContent::Original(owd) => owd.tracks.clone(),
@@ -1354,9 +1377,8 @@ fn clip_command(
         }
     });
 
-    let file = fs::File::open(&input).context("Failed to open input file")?;
-    let file_len = file.metadata()?.len();
-    let mut reader = SmedReader::new(file).context("Failed to initialize SmedReader")?;
+    let file_len = fs::metadata(&input)?.len();
+    let mut reader = open_smed_reader(&input)?;
 
     let original_manifest = reader.manifest.clone();
 
