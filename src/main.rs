@@ -305,6 +305,31 @@ fn resolve_track_entries<R: Read + Seek>(
     build_sequential_entries(track.total_chunks, track.chunk_size, data_size)
 }
 
+fn find_idr_start<R: Read + Seek>(
+    reader: &mut SmedReader<R>,
+    entries: &[TrackChunkIndexEntry],
+    start: u64,
+) -> Result<u64> {
+    if entries.is_empty() {
+        return Err(anyhow!("No chunk entries available for keyframe search"));
+    }
+    let start_index = start.min(entries.len().saturating_sub(1) as u64);
+    for idx in (0..=start_index).rev() {
+        let entry = entries
+            .get(idx as usize)
+            .context("Missing chunk entry")?;
+        let data = reader.read_variable_chunk(entry.offset, entry.size)?;
+        if let Some(info) = codec::parse_annexb_nals(&data) {
+            if info.nals.iter().any(|nal| nal.is_idr) {
+                return Ok(idx);
+            }
+        }
+    }
+    Err(anyhow!(
+        "Unable to locate a keyframe chunk before the requested clip start"
+    ))
+}
+
 fn sign_command(
     inputs: Vec<PathBuf>,
     key_path: PathBuf,
@@ -1368,6 +1393,17 @@ fn clip_command(
         let end = end.ok_or_else(|| {
             anyhow!("--end is required when timestamps are unavailable for this track")
         })?;
+        (start, end)
+    };
+    let (start, end) = if matches!(track.codec.as_str(), "h264" | "h265" | "hevc") {
+        let adjusted_start = find_idr_start(&mut reader, &track_entries, start)?;
+        if adjusted_start >= end {
+            return Err(anyhow!(
+                "Unable to find a keyframe before the requested clip range"
+            ));
+        }
+        (adjusted_start, end)
+    } else {
         (start, end)
     };
 
