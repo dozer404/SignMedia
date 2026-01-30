@@ -8,10 +8,11 @@ use signmedia::crypto::{self, MerkleTree};
 use signmedia::models::{
     ManifestContent, OriginalWorkDescriptor, SignedManifest, TrackChunkIndexEntry, TrackMetadata,
 };
+use signmedia::timecode;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{BufReader, BufWriter, Read, Seek, Write};
 use std::path::PathBuf;
-use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 
 #[derive(Parser)]
@@ -73,10 +74,16 @@ enum Commands {
         output: PathBuf,
         /// Start chunk index
         #[arg(long)]
-        start: u64,
+        start: Option<u64>,
         /// End chunk index (exclusive)
         #[arg(long)]
-        end: u64,
+        end: Option<u64>,
+        /// Start time in seconds
+        #[arg(long)]
+        start_time: Option<f64>,
+        /// End time in seconds
+        #[arg(long)]
+        end_time: Option<f64>,
         /// Track ID to clip (defaults to 0)
         #[arg(long, default_value_t = 0)]
         track: u32,
@@ -127,7 +134,15 @@ fn main() -> Result<()> {
             author_role,
             chunk_size,
         } => {
-            sign_command(inputs, key, output, title, author_name, author_role, chunk_size)?;
+            sign_command(
+                inputs,
+                key,
+                output,
+                title,
+                author_name,
+                author_role,
+                chunk_size,
+            )?;
         }
         Commands::Verify { input } => {
             verify_command(input)?;
@@ -138,9 +153,11 @@ fn main() -> Result<()> {
             output,
             start,
             end,
+            start_time,
+            end_time,
             track,
         } => {
-            clip_command(input, key, output, start, end, track)?;
+            clip_command(input, key, output, start, end, start_time, end_time, track)?;
         }
         Commands::Info { input } => {
             info_command(input)?;
@@ -202,7 +219,10 @@ fn verify_manifest_signatures(manifest: &SignedManifest, content_name: &str) -> 
             content_name
         ));
     }
-    println!("Trusted Third Party (TTP) oversight verified for {}.", content_name);
+    println!(
+        "Trusted Third Party (TTP) oversight verified for {}.",
+        content_name
+    );
 
     Ok(())
 }
@@ -817,9 +837,10 @@ fn verify_metadata_command(input: PathBuf) -> Result<()> {
 
     let (expected_work_id, label) = match &parsed_manifest.content {
         ManifestContent::Original(owd) => (owd.work_id.to_string(), "smed.work_id"),
-        ManifestContent::Derivative(dwd) => {
-            (dwd.original_owd.work_id.to_string(), "smed.original_work_id")
-        }
+        ManifestContent::Derivative(dwd) => (
+            dwd.original_owd.work_id.to_string(),
+            "smed.original_work_id",
+        ),
     };
     if let Some(tag_value) = normalized.get(label) {
         if tag_value != &expected_work_id {
@@ -853,7 +874,10 @@ fn verify_metadata_command(input: PathBuf) -> Result<()> {
         println!("Work ID: {}", expected_work_id);
         Ok(())
     } else {
-        Err(anyhow!("Metadata verification failed: {}", mismatches.join("; ")))
+        Err(anyhow!(
+            "Metadata verification failed: {}",
+            mismatches.join("; ")
+        ))
     }
 }
 
@@ -912,14 +936,8 @@ fn build_extract_metadata(manifest: &SignedManifest) -> Result<Vec<(String, Stri
         "smed.manifest_b64".to_string(),
         general_purpose::STANDARD.encode(&manifest_json),
     ));
-    metadata.push((
-        "smed.manifest_hash".to_string(),
-        hex::encode(manifest_hash),
-    ));
-    metadata.push((
-        "smed.content_hash".to_string(),
-        hex::encode(content_hash),
-    ));
+    metadata.push(("smed.manifest_hash".to_string(), hex::encode(manifest_hash)));
+    metadata.push(("smed.content_hash".to_string(), hex::encode(content_hash)));
     metadata.push((
         "smed.signature_count".to_string(),
         manifest.signatures.len().to_string(),
@@ -931,27 +949,21 @@ fn build_extract_metadata(manifest: &SignedManifest) -> Result<Vec<(String, Stri
             metadata.push(("smed.type".to_string(), "original".to_string()));
             metadata.push(("smed.work_id".to_string(), owd.work_id.to_string()));
             metadata.push(("smed.title".to_string(), owd.title.clone()));
-            metadata.push((
-                "smed.created_at".to_string(),
-                owd.created_at.to_rfc3339(),
-            ));
+            metadata.push(("smed.created_at".to_string(), owd.created_at.to_rfc3339()));
             metadata.push((
                 "smed.author_count".to_string(),
                 owd.authors.len().to_string(),
             ));
-            metadata.push((
-                "smed.track_count".to_string(),
-                owd.tracks.len().to_string(),
-            ));
+            metadata.push(("smed.track_count".to_string(), owd.tracks.len().to_string()));
             if let Some(fp) = &owd.authorship_fingerprint {
-                metadata.push((
-                    "smed.authorship_fingerprint".to_string(),
-                    fp.clone(),
-                ));
+                metadata.push(("smed.authorship_fingerprint".to_string(), fp.clone()));
             }
             if !owd.authors.is_empty() {
-                let names: Vec<String> =
-                    owd.authors.iter().map(|author| author.name.clone()).collect();
+                let names: Vec<String> = owd
+                    .authors
+                    .iter()
+                    .map(|author| author.name.clone())
+                    .collect();
                 for name in &names {
                     author_names.insert(name.clone());
                 }
@@ -973,10 +985,7 @@ fn build_extract_metadata(manifest: &SignedManifest) -> Result<Vec<(String, Stri
                 dwd.original_owd.title.clone(),
             ));
             metadata.push(("smed.clipper_id".to_string(), dwd.clipper_id.clone()));
-            metadata.push((
-                "smed.created_at".to_string(),
-                dwd.created_at.to_rfc3339(),
-            ));
+            metadata.push(("smed.created_at".to_string(), dwd.created_at.to_rfc3339()));
             metadata.push((
                 "smed.ancestry_count".to_string(),
                 dwd.ancestry.len().to_string(),
@@ -986,10 +995,7 @@ fn build_extract_metadata(manifest: &SignedManifest) -> Result<Vec<(String, Stri
                 dwd.clip_mappings.len().to_string(),
             ));
             if let Some(fp) = &dwd.authorship_fingerprint {
-                metadata.push((
-                    "smed.derivative_fingerprint".to_string(),
-                    fp.clone(),
-                ));
+                metadata.push(("smed.derivative_fingerprint".to_string(), fp.clone()));
             }
             if let Some(fp) = &dwd.original_owd.authorship_fingerprint {
                 metadata.push((
@@ -1029,9 +1035,8 @@ fn extract_raw_track_passthrough(
     let mut entries = resolve_chunk_entries(reader, track, file_len, track_count)?;
     entries.sort_by_key(|entry| entry.offset);
 
-    let mut writer = BufWriter::new(
-        fs::File::create(output).context("Failed to create output file")?,
-    );
+    let mut writer =
+        BufWriter::new(fs::File::create(output).context("Failed to create output file")?);
     for entry in entries {
         let data = reader.read_variable_chunk(entry.offset, entry.size)?;
         writer.write_all(&data)?;
@@ -1055,7 +1060,11 @@ fn extract_command(input: PathBuf, output: PathBuf) -> Result<()> {
     }
 
     let mut track_ids: Vec<u32> = if !reader.track_table.is_empty() {
-        reader.track_table.iter().map(|entry| entry.track_id).collect()
+        reader
+            .track_table
+            .iter()
+            .map(|entry| entry.track_id)
+            .collect()
     } else if !reader.chunk_index.is_empty() {
         reader.chunk_index.keys().copied().collect()
     } else {
@@ -1098,12 +1107,8 @@ fn extract_command(input: PathBuf, output: PathBuf) -> Result<()> {
                 track_ids.len(),
                 &temp_path,
             )?;
-            let remux_result = remux_container_with_ffmpeg(
-                &temp_path,
-                &output,
-                &metadata,
-                &output_ext,
-            );
+            let remux_result =
+                remux_container_with_ffmpeg(&temp_path, &output, &metadata, &output_ext);
             let _ = fs::remove_file(&temp_path);
             let _ = fs::remove_dir(&temp_dir);
             remux_result?;
@@ -1120,8 +1125,7 @@ fn extract_command(input: PathBuf, output: PathBuf) -> Result<()> {
         let track = tracks_by_id
             .get(track_id)
             .context(format!("Missing track metadata for track {}", track_id))?;
-        let mut entries =
-            resolve_chunk_entries(&reader, track, file_len, track_ids.len())?;
+        let mut entries = resolve_chunk_entries(&reader, track, file_len, track_ids.len())?;
         entries.sort_by_key(|entry| entry.offset);
 
         let format = match codec_to_ffmpeg_format(&track.codec) {
@@ -1136,8 +1140,7 @@ fn extract_command(input: PathBuf, output: PathBuf) -> Result<()> {
 
         let track_path = temp_dir.join(format!("track-{}-{}.bin", track_id, track.codec));
         let mut writer = BufWriter::new(
-            fs::File::create(&track_path)
-                .context("Failed to create extracted track file")?,
+            fs::File::create(&track_path).context("Failed to create extracted track file")?,
         );
 
         for entry in entries {
@@ -1254,8 +1257,10 @@ fn clip_command(
     input: PathBuf,
     key_path: PathBuf,
     output: PathBuf,
-    start: u64,
-    end: u64,
+    start: Option<u64>,
+    end: Option<u64>,
+    start_time: Option<f64>,
+    end_time: Option<f64>,
     track_id_to_clip: u32,
 ) -> Result<()> {
     let key_bytes = fs::read(key_path).context("Failed to read key file")?;
@@ -1309,15 +1314,32 @@ fn clip_command(
         .clone();
     let track_id = track.track_id;
     let total_chunks = track.total_chunks;
+    let track_entries = resolve_track_entries(&reader, &track, file_len);
+    let time_range = if start_time.is_some() || end_time.is_some() {
+        timecode::time_range_to_chunk_range(&track, &track_entries, start_time, end_time)
+    } else {
+        None
+    };
+    let (start, end) = if let Some((start, end)) = time_range {
+        (start, end)
+    } else {
+        let start = start.ok_or_else(|| {
+            anyhow!("--start is required when timestamps are unavailable for this track")
+        })?;
+        let end = end.ok_or_else(|| {
+            anyhow!("--end is required when timestamps are unavailable for this track")
+        })?;
+        (start, end)
+    };
 
     let mut clip_chunks = Vec::new();
     let mut proofs = Vec::new();
     if let (Some(mapping), Some(existing_proofs)) = (source_mapping, source_proofs) {
-        if end > existing_proofs.len() as u64 {
-            return Err(anyhow!("End index out of bounds for derivative input"));
-        }
         if start >= end {
             return Err(anyhow!("Start index must be less than end index"));
+        }
+        if time_range.is_none() && end > existing_proofs.len() as u64 {
+            return Err(anyhow!("End index out of bounds for derivative input"));
         }
         let data_size = file_len - reader.data_start();
         let mut current_offset = 0;
@@ -1332,7 +1354,13 @@ fn clip_command(
             });
         for (index, proof) in existing_proofs.iter().enumerate() {
             let proof_index = index as u64;
-            if proof_index >= start && proof_index < end {
+            let proof_chunk_index = proof.chunk_index;
+            let in_range = if time_range.is_some() {
+                proof_chunk_index >= start && proof_chunk_index < end
+            } else {
+                proof_index >= start && proof_index < end
+            };
+            if in_range {
                 let chunk = if let Some(lookup) = &chunk_lookup {
                     let entry = lookup
                         .get(&proof.chunk_index)
@@ -1431,7 +1459,7 @@ fn clip_command(
 
     println!("Extracting original chunks and reconstructing Merkle tree...");
     let mut original_hashes = Vec::new();
-    let mut entries = resolve_track_entries(&reader, &track, file_len);
+    let mut entries = track_entries;
     entries.sort_by_key(|entry| entry.chunk_index);
     for entry in &entries {
         let chunk = reader.read_variable_chunk(entry.offset, entry.size)?;
@@ -1559,8 +1587,8 @@ fn chunk_media(
                 height: info.height,
                 sample_rate: None,
                 channels: None,
-                timebase_num: None,
-                timebase_den: None,
+                timebase_num: info.timebase_num,
+                timebase_den: info.timebase_den,
             },
         ));
     }
@@ -1677,10 +1705,19 @@ fn group_adts_frames(
 }
 
 struct AnnexbParseInfo {
-    nals: Vec<(usize, usize, bool)>,
+    nals: Vec<AnnexbNal>,
     codec_extradata: Option<Vec<u8>>,
     width: Option<u32>,
     height: Option<u32>,
+    timebase_num: Option<u32>,
+    timebase_den: Option<u32>,
+}
+
+struct AnnexbNal {
+    start: usize,
+    end: usize,
+    is_idr: bool,
+    pts: Option<i64>,
 }
 
 fn parse_annexb_nals(data: &[u8]) -> Option<AnnexbParseInfo> {
@@ -1713,6 +1750,7 @@ fn parse_annexb_nals(data: &[u8]) -> Option<AnnexbParseInfo> {
     let mut nals = Vec::new();
     let mut sps = None;
     let mut pps = None;
+    let mut current_pts = 0i64;
     for idx in 0..starts.len() {
         let (start, code_len) = starts[idx];
         let end = if idx + 1 < starts.len() {
@@ -1725,7 +1763,23 @@ fn parse_annexb_nals(data: &[u8]) -> Option<AnnexbParseInfo> {
         }
         let nal_type = data[start + code_len] & 0x1F;
         let is_idr = nal_type == 5;
-        nals.push((start, end, is_idr));
+        if (1..=5).contains(&nal_type) {
+            let pts = current_pts;
+            current_pts = current_pts.saturating_add(1);
+            nals.push(AnnexbNal {
+                start,
+                end,
+                is_idr,
+                pts: Some(pts),
+            });
+        } else {
+            nals.push(AnnexbNal {
+                start,
+                end,
+                is_idr,
+                pts: Some(current_pts),
+            });
+        }
         match nal_type {
             7 => {
                 if sps.is_none() {
@@ -1743,23 +1797,32 @@ fn parse_annexb_nals(data: &[u8]) -> Option<AnnexbParseInfo> {
     if nals.is_empty() {
         None
     } else {
-        let (codec_extradata, width, height) = match (sps.as_deref(), pps.as_deref()) {
-            (Some(sps_bytes), Some(pps_bytes)) => {
-                let extradata = build_avcc_extradata(sps_bytes, pps_bytes);
-                let (width, height) = parse_h264_sps_dimensions(sps_bytes).unwrap_or((0, 0));
-                (
-                    Some(extradata),
-                    if width == 0 { None } else { Some(width) },
-                    if height == 0 { None } else { Some(height) },
-                )
-            }
-            _ => (None, None, None),
-        };
+        let (codec_extradata, width, height, timebase_num, timebase_den) =
+            match (sps.as_deref(), pps.as_deref()) {
+                (Some(sps_bytes), Some(pps_bytes)) => {
+                    let extradata = build_avcc_extradata(sps_bytes, pps_bytes);
+                    let (width, height) = parse_h264_sps_dimensions(sps_bytes).unwrap_or((0, 0));
+                    let timing = parse_h264_sps_timing(sps_bytes);
+                    let (timebase_num, timebase_den) = timing
+                        .map(|(num, den)| (Some(num), Some(den)))
+                        .unwrap_or((None, None));
+                    (
+                        Some(extradata),
+                        if width == 0 { None } else { Some(width) },
+                        if height == 0 { None } else { Some(height) },
+                        timebase_num,
+                        timebase_den,
+                    )
+                }
+                _ => (None, None, None, None, None),
+            };
         Some(AnnexbParseInfo {
             nals,
             codec_extradata,
             width,
             height,
+            timebase_num,
+            timebase_den,
         })
     }
 }
@@ -1774,7 +1837,15 @@ fn looks_like_isobmff(data: &[u8]) -> bool {
     }
     if matches!(
         box_type,
-        b"ftyp" | b"moov" | b"moof" | b"mdat" | b"free" | b"skip" | b"wide" | b"uuid" | b"jumb"
+        b"ftyp"
+            | b"moov"
+            | b"moof"
+            | b"mdat"
+            | b"free"
+            | b"skip"
+            | b"wide"
+            | b"uuid"
+            | b"jumb"
             | b"meta"
     ) {
         return true;
@@ -1789,7 +1860,10 @@ fn looks_like_isobmff(data: &[u8]) -> bool {
             data[offset + 3],
         ]) as usize;
         let kind = &data[offset + 4..offset + 8];
-        if matches!(kind, b"ftyp" | b"moov" | b"moof" | b"mdat" | b"jumb" | b"meta") {
+        if matches!(
+            kind,
+            b"ftyp" | b"moov" | b"moof" | b"mdat" | b"jumb" | b"meta"
+        ) {
             return true;
         }
         if size < 8 || size > scan_len - offset {
@@ -1800,33 +1874,33 @@ fn looks_like_isobmff(data: &[u8]) -> bool {
     false
 }
 
-fn group_nals(
-    data: &[u8],
-    nals: &[(usize, usize, bool)],
-    max_chunk_size: u64,
-) -> Vec<ChunkWithMeta> {
+fn group_nals(data: &[u8], nals: &[AnnexbNal], max_chunk_size: u64) -> Vec<ChunkWithMeta> {
     let mut chunks = Vec::new();
     let mut current = Vec::new();
-    for (start, end, is_idr) in nals {
-        let nal_len = end - start;
-        if *is_idr && !current.is_empty() {
+    let mut current_pts = None;
+    for nal in nals {
+        let nal_len = nal.end - nal.start;
+        if nal.is_idr && !current.is_empty() {
             chunks.push(ChunkWithMeta {
                 data: std::mem::take(&mut current),
-                pts: None,
+                pts: current_pts.take(),
             });
         }
         if !current.is_empty() && current.len() as u64 + nal_len as u64 > max_chunk_size {
             chunks.push(ChunkWithMeta {
                 data: std::mem::take(&mut current),
-                pts: None,
+                pts: current_pts.take(),
             });
         }
-        current.extend_from_slice(&data[*start..*end]);
+        if current.is_empty() {
+            current_pts = nal.pts;
+        }
+        current.extend_from_slice(&data[nal.start..nal.end]);
     }
     if !current.is_empty() {
         chunks.push(ChunkWithMeta {
             data: current,
-            pts: None,
+            pts: current_pts,
         });
     }
     chunks
@@ -1945,6 +2019,114 @@ fn parse_h264_sps_dimensions(sps: &[u8]) -> Option<(u32, u32)> {
     let width = width.saturating_sub((frame_crop_left + frame_crop_right) * crop_unit_x);
     let height = height.saturating_sub((frame_crop_top + frame_crop_bottom) * crop_unit_y);
     Some((width, height))
+}
+
+fn parse_h264_sps_timing(sps: &[u8]) -> Option<(u32, u32)> {
+    if sps.len() < 4 {
+        return None;
+    }
+    let rbsp = remove_emulation_prevention_bytes(&sps[1..]);
+    let mut reader = BitReader::new(&rbsp);
+    let profile_idc = reader.read_bits(8)? as u8;
+    reader.read_bits(8)?;
+    reader.read_bits(8)?;
+    reader.read_ue()?;
+    let mut chroma_format_idc = 1u32;
+    if matches!(
+        profile_idc,
+        100 | 110 | 122 | 244 | 44 | 83 | 86 | 118 | 128 | 138 | 139 | 134
+    ) {
+        chroma_format_idc = reader.read_ue()?;
+        if chroma_format_idc == 3 {
+            reader.read_bits(1)?;
+        }
+        reader.read_ue()?;
+        reader.read_ue()?;
+        reader.read_bits(1)?;
+        let seq_scaling_matrix_present_flag = reader.read_bits(1)?;
+        if seq_scaling_matrix_present_flag == 1 {
+            let scaling_list_count = if chroma_format_idc == 3 { 12 } else { 8 };
+            for i in 0..scaling_list_count {
+                let scaling_list_present = reader.read_bits(1)?;
+                if scaling_list_present == 1 {
+                    skip_scaling_list(&mut reader, if i < 6 { 16 } else { 64 })?;
+                }
+            }
+        }
+    }
+    reader.read_ue()?;
+    let pic_order_cnt_type = reader.read_ue()?;
+    if pic_order_cnt_type == 0 {
+        reader.read_ue()?;
+    } else if pic_order_cnt_type == 1 {
+        reader.read_bits(1)?;
+        reader.read_se()?;
+        reader.read_se()?;
+        let num_ref_frames_in_pic_order_cnt_cycle = reader.read_ue()?;
+        for _ in 0..num_ref_frames_in_pic_order_cnt_cycle {
+            reader.read_se()?;
+        }
+    }
+    reader.read_ue()?;
+    reader.read_bits(1)?;
+    reader.read_ue()?;
+    reader.read_ue()?;
+    let frame_mbs_only_flag = reader.read_bits(1)?;
+    if frame_mbs_only_flag == 0 {
+        reader.read_bits(1)?;
+    }
+    reader.read_bits(1)?;
+    let frame_cropping_flag = reader.read_bits(1)?;
+    if frame_cropping_flag == 1 {
+        reader.read_ue()?;
+        reader.read_ue()?;
+        reader.read_ue()?;
+        reader.read_ue()?;
+    }
+    let vui_parameters_present_flag = reader.read_bits(1)?;
+    if vui_parameters_present_flag == 0 {
+        return None;
+    }
+    let aspect_ratio_info_present_flag = reader.read_bits(1)?;
+    if aspect_ratio_info_present_flag == 1 {
+        let aspect_ratio_idc = reader.read_bits(8)?;
+        if aspect_ratio_idc == 255 {
+            reader.read_bits(16)?;
+            reader.read_bits(16)?;
+        }
+    }
+    let overscan_info_present_flag = reader.read_bits(1)?;
+    if overscan_info_present_flag == 1 {
+        reader.read_bits(1)?;
+    }
+    let video_signal_type_present_flag = reader.read_bits(1)?;
+    if video_signal_type_present_flag == 1 {
+        reader.read_bits(3)?;
+        reader.read_bits(1)?;
+        let colour_description_present_flag = reader.read_bits(1)?;
+        if colour_description_present_flag == 1 {
+            reader.read_bits(8)?;
+            reader.read_bits(8)?;
+            reader.read_bits(8)?;
+        }
+    }
+    let chroma_loc_info_present_flag = reader.read_bits(1)?;
+    if chroma_loc_info_present_flag == 1 {
+        reader.read_ue()?;
+        reader.read_ue()?;
+    }
+    let timing_info_present_flag = reader.read_bits(1)?;
+    if timing_info_present_flag == 0 {
+        return None;
+    }
+    let num_units_in_tick = reader.read_bits(32)?;
+    let time_scale = reader.read_bits(32)?;
+    let _fixed_frame_rate_flag = reader.read_bits(1)?;
+    if num_units_in_tick == 0 || time_scale == 0 {
+        return None;
+    }
+    let timebase_num = num_units_in_tick.saturating_mul(2);
+    Some((timebase_num, time_scale))
 }
 
 fn remove_emulation_prevention_bytes(data: &[u8]) -> Vec<u8> {
