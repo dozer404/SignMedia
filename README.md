@@ -195,7 +195,7 @@ Sign a file and create a `.smed` container:
 
 ### Create a private key
 
-    gen-key 
+    gen-key --output key.priv
 
 ### Create a signed original
 
@@ -207,7 +207,7 @@ Sign a file and create a `.smed` container:
 
 ### Create a clip (00:10 - 00:25)
 
-    clip --input original.smed --start 10 --end 25 --editor-key editor.priv --output clip.smed
+    clip --input original.smed --editor-key editor.priv --clipper-name "Editor" --output clip.smed --start 10 --end 25
 
 ## Get SMED metadata info
 
