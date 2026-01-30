@@ -506,6 +506,7 @@ mod tests {
                 tracks: vec![crate::models::TrackMetadata {
                     track_id: 0,
                     codec: "raw".to_string(),
+                    container_type: None,
                     codec_extradata: None,
                     width: None,
                     height: None,

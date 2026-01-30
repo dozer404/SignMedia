@@ -162,7 +162,7 @@ Commands:
   verify   Verify a .smed file
   clip     Create a clip from a .smed file
   info     Show information about a .smed file
-  extract  Extract tracks from a .smed file into a container (MP4/MKV)
+  extract  Extract tracks from a .smed file into a container (MP4/MKV/WEBM)
   verify-metadata  Verify embedded SignMedia metadata in an extracted container
   help     Print this message or the help of the given subcommand(s)
 
@@ -186,6 +186,10 @@ cargo run -- gen-key --output key.priv
 ```
 
 Sign a file and create a `.smed` container:
+
+- Inputs may be elementary streams (H.264/H.265/AAC) or common containers
+  (MP4/MKV/WEBM). Container inputs are demuxed to an elementary stream before
+  chunking so track metadata records the actual codec.
 
 ```bash
 
@@ -214,6 +218,9 @@ Sign a file and create a `.smed` container:
     info --input original.smed
 
 ## Extract signed metadata playable file
+
+Extraction outputs MP4/MKV/WEBM containers. Raw container tracks can only be
+extracted to the same container extension they were originally signed with.
 
     extract --input original.smed --output extracted.mp4
 

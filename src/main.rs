@@ -98,7 +98,7 @@ enum Commands {
         #[arg(short, long)]
         input: PathBuf,
     },
-    /// Extract tracks from a .smed file into a container (MP4/MKV)
+    /// Extract tracks from a .smed file into a container (MP4/MKV/WEBM)
     Extract {
         /// Input .smed file
         #[arg(short, long)]
@@ -305,6 +305,31 @@ fn resolve_track_entries<R: Read + Seek>(
     build_sequential_entries(track.total_chunks, track.chunk_size, data_size)
 }
 
+fn find_idr_start<R: Read + Seek>(
+    reader: &mut SmedReader<R>,
+    entries: &[TrackChunkIndexEntry],
+    start: u64,
+) -> Result<u64> {
+    if entries.is_empty() {
+        return Err(anyhow!("No chunk entries available for keyframe search"));
+    }
+    let start_index = start.min(entries.len().saturating_sub(1) as u64);
+    for idx in (0..=start_index).rev() {
+        let entry = entries
+            .get(idx as usize)
+            .context("Missing chunk entry")?;
+        let data = reader.read_variable_chunk(entry.offset, entry.size)?;
+        if let Some(info) = codec::parse_annexb_nals(&data) {
+            if info.nals.iter().any(|nal| nal.is_idr) {
+                return Ok(idx);
+            }
+        }
+    }
+    Err(anyhow!(
+        "Unable to locate a keyframe chunk before the requested clip start"
+    ))
+}
+
 fn sign_command(
     inputs: Vec<PathBuf>,
     key_path: PathBuf,
@@ -366,6 +391,7 @@ fn sign_command(
         track_metadata.push(TrackMetadata {
             track_id,
             codec: playback_info.codec.clone(),
+            container_type: playback_info.container_type.clone(),
             codec_extradata: playback_info
                 .codec_extradata
                 .as_ref()
@@ -1111,9 +1137,9 @@ fn extract_command(input: PathBuf, output: PathBuf) -> Result<()> {
         .and_then(|ext| ext.to_str())
         .map(|ext| ext.to_ascii_lowercase())
         .unwrap_or_default();
-    if output_ext != "mkv" && output_ext != "mp4" {
+    if output_ext != "mkv" && output_ext != "mp4" && output_ext != "webm" {
         return Err(anyhow!(
-            "Unsupported output container: {:?} (expected .mp4 or .mkv)",
+            "Unsupported output container: {:?} (expected .mp4, .mkv, or .webm)",
             output
         ));
     }
@@ -1126,23 +1152,41 @@ fn extract_command(input: PathBuf, output: PathBuf) -> Result<()> {
             .get(&track_id)
             .context(format!("Missing track metadata for track {}", track_id))?;
         if track.codec.eq_ignore_ascii_case("raw") {
-            let temp_dir = std::env::temp_dir().join(format!("smed-extract-{}", Uuid::new_v4()));
-            fs::create_dir_all(&temp_dir).context("Failed to create temp directory")?;
-            let temp_path = temp_dir.join("raw-track.bin");
+            let Some(container_type) = track.container_type.as_deref() else {
+                return Err(anyhow!(
+                    "Track {} is raw with an unknown container type; cannot extract without conversion",
+                    track_id
+                ));
+            };
+            if output_ext != container_type {
+                return Err(anyhow!(
+                    "Track {} is a raw {} container; output extension .{} does not match",
+                    track_id,
+                    container_type,
+                    output_ext
+                ));
+            }
             extract_raw_track_passthrough(
                 &mut reader,
                 track,
                 file_len,
                 track_ids.len(),
-                &temp_path,
+                &output,
             )?;
-            let remux_result =
-                remux_container_with_ffmpeg(&temp_path, &output, &metadata, &output_ext);
-            let _ = fs::remove_file(&temp_path);
-            let _ = fs::remove_dir(&temp_dir);
-            remux_result?;
             println!("Extracted container written to {:?}", output);
             return Ok(());
+        }
+    }
+
+    for track_id in &track_ids {
+        let track = tracks_by_id
+            .get(track_id)
+            .context(format!("Missing track metadata for track {}", track_id))?;
+        if track.codec.eq_ignore_ascii_case("raw") {
+            return Err(anyhow!(
+                "Track {} is raw and cannot be muxed; re-sign with demuxable inputs or extract a single matching container",
+                track_id
+            ));
         }
     }
 
@@ -1171,6 +1215,15 @@ fn extract_command(input: PathBuf, output: PathBuf) -> Result<()> {
         let mut writer = BufWriter::new(
             fs::File::create(&track_path).context("Failed to create extracted track file")?,
         );
+        if matches!(track.codec.as_str(), "h264" | "h265" | "hevc") {
+            if let Some(extradata) = &track.codec_extradata {
+                let bytes = hex::decode(extradata)
+                    .context("Failed to decode codec extradata")?;
+                if !bytes.is_empty() {
+                    writer.write_all(&bytes)?;
+                }
+            }
+        }
 
         for entry in entries {
             let data = reader.read_variable_chunk(entry.offset, entry.size)?;
@@ -1249,31 +1302,6 @@ fn mux_tracks_with_ffmpeg(
     Ok(())
 }
 
-fn remux_container_with_ffmpeg(
-    input: &PathBuf,
-    output: &PathBuf,
-    metadata: &[(String, String)],
-    output_ext: &str,
-) -> Result<()> {
-    let mut command = std::process::Command::new("ffmpeg");
-    command.arg("-y");
-    command.arg("-i").arg(input);
-    if output_ext == "mp4" {
-        command.arg("-movflags").arg("use_metadata_tags");
-    }
-    for (key, value) in metadata {
-        command.arg("-metadata").arg(format!("{}={}", key, value));
-    }
-    command.arg("-c").arg("copy").arg(output);
-    let status = command
-        .status()
-        .context("Failed to invoke ffmpeg for container remux")?;
-    if !status.success() {
-        return Err(anyhow!("ffmpeg failed with status {}", status));
-    }
-    Ok(())
-}
-
 fn clip_command(
     input: PathBuf,
     key_path: PathBuf,
@@ -1342,6 +1370,12 @@ fn clip_command(
             track_id_to_clip
         ))?
         .clone();
+    if track.codec.eq_ignore_ascii_case("raw") {
+        return Err(anyhow!(
+            "Track {} uses codec \"raw\"; clipping opaque containers is unsupported. Re-sign the input with a demuxable container (MP4/MKV/WEBM) or provide an elementary stream (H.264/H.265/AAC) so the track has a real codec.",
+            track.track_id
+        ));
+    }
     let track_id = track.track_id;
     let total_chunks = track.total_chunks;
     let track_entries = resolve_track_entries(&reader, &track, file_len);
@@ -1359,6 +1393,17 @@ fn clip_command(
         let end = end.ok_or_else(|| {
             anyhow!("--end is required when timestamps are unavailable for this track")
         })?;
+        (start, end)
+    };
+    let (start, end) = if matches!(track.codec.as_str(), "h264" | "h265" | "hevc") {
+        let adjusted_start = find_idr_start(&mut reader, &track_entries, start)?;
+        if adjusted_start >= end {
+            return Err(anyhow!(
+                "Unable to find a keyframe before the requested clip range"
+            ));
+        }
+        (adjusted_start, end)
+    } else {
         (start, end)
     };
 
