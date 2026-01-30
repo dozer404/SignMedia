@@ -1190,6 +1190,15 @@ fn extract_command(input: PathBuf, output: PathBuf) -> Result<()> {
         let mut writer = BufWriter::new(
             fs::File::create(&track_path).context("Failed to create extracted track file")?,
         );
+        if matches!(track.codec.as_str(), "h264" | "h265" | "hevc") {
+            if let Some(extradata) = &track.codec_extradata {
+                let bytes = hex::decode(extradata)
+                    .context("Failed to decode codec extradata")?;
+                if !bytes.is_empty() {
+                    writer.write_all(&bytes)?;
+                }
+            }
+        }
 
         for entry in entries {
             let data = reader.read_variable_chunk(entry.offset, entry.size)?;

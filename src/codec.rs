@@ -490,7 +490,7 @@ pub fn parse_annexb_nals(data: &[u8]) -> Option<AnnexbParseInfo> {
     let (codec_extradata, width, height, timebase_num, timebase_den) = match codec {
         AnnexbCodec::H264 => match (sps.as_deref(), pps.as_deref()) {
             (Some(sps_bytes), Some(pps_bytes)) => {
-                let extradata = build_avcc_extradata(sps_bytes, pps_bytes);
+                let extradata = build_annexb_extradata(&[sps_bytes, pps_bytes]);
                 let (width, height) = parse_h264_sps_dimensions(sps_bytes).unwrap_or((0, 0));
                 let timing = parse_h264_sps_timing(sps_bytes);
                 let (timebase_num, timebase_den) = timing
@@ -507,18 +507,17 @@ pub fn parse_annexb_nals(data: &[u8]) -> Option<AnnexbParseInfo> {
             _ => (None, None, None, None, None),
         },
         AnnexbCodec::H265 => {
-            // H.265 extradata (HVCC) is complex to build, for now we might just concatenate or provide a placeholder
-            // In a real implementation we'd follow ISO/IEC 14496-15
-            let mut extradata = Vec::new();
-            if let Some(v) = &vps {
-                extradata.extend_from_slice(v);
+            let mut units = Vec::new();
+            if let Some(v) = vps.as_deref() {
+                units.push(v);
             }
-            if let Some(s) = &sps {
-                extradata.extend_from_slice(s);
+            if let Some(s) = sps.as_deref() {
+                units.push(s);
             }
-            if let Some(p) = &pps {
-                extradata.extend_from_slice(p);
+            if let Some(p) = pps.as_deref() {
+                units.push(p);
             }
+            let extradata = build_annexb_extradata(&units);
             (
                 if extradata.is_empty() {
                     None
@@ -651,6 +650,18 @@ pub fn build_avcc_extradata(sps: &[u8], pps: &[u8]) -> Vec<u8> {
     extradata.push(1); // numOfPictureParameterSets = 1
     extradata.extend_from_slice(&(pps.len() as u16).to_be_bytes());
     extradata.extend_from_slice(pps);
+    extradata
+}
+
+pub fn build_annexb_extradata(units: &[&[u8]]) -> Vec<u8> {
+    let mut extradata = Vec::new();
+    for unit in units {
+        if unit.is_empty() {
+            continue;
+        }
+        extradata.extend_from_slice(&[0, 0, 0, 1]);
+        extradata.extend_from_slice(unit);
+    }
     extradata
 }
 
