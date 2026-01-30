@@ -157,14 +157,13 @@ SignMedia CLI tool
 Usage: signmedia <COMMAND>
 
 Commands:
-  gen-key  Generate a new Ed25519 keypair
-  sign     Sign one or more media files and create a .smed container
-  verify   Verify a .smed file
-  clip     Create a clip from a .smed file
-  info     Show information about a .smed file
-  extract  Extract tracks from a .smed file into a container (MP4/MKV/WEBM)
+  gen-key          Generate a new Ed25519 keypair
+  sign             Sign one or more media files and create a .smed container
+  clip             Create a clip from a .smed file
+  verify-smed      Show information and verify cryptographic integrity of a .smed file
+  extract          Extract tracks from a .smed file into a container (MP4/MKV/WEBM)
   verify-metadata  Verify embedded SignMedia metadata in an extracted container
-  help     Print this message or the help of the given subcommand(s)
+  help             Print this message or the help of the given subcommand(s)
 
 Options:
   -h, --help  Print help
@@ -205,17 +204,13 @@ Sign a file and create a `.smed` container:
 
     sign --inputs original.mp4  --key key.priv --output original.smed --author-name "Waldo" --author-role original --title "My Work"
 
-### Verify original
+### Verify original and get metadata info
 
-    verify --input original.smed
+    verify-smed --input original.smed
 
 ### Create a clip (00:10 - 00:25)
 
     clip --input original.smed --editor-key editor.priv --clipper-name "Editor" --output clip.smed --start 10 --end 25
-
-## Get SMED metadata info
-
-    info --input original.smed
 
 ## Extract signed metadata playable file
 
