@@ -86,13 +86,6 @@ enum Commands {
         #[arg(long, default_value_t = 0)]
         track: u32,
     },
-    /// Show information and verify cryptographic integrity of a .smed file
-    #[command(name = "verify-smed", alias = "VERIFY-SMED")]
-    VerifySmed {
-        /// Input .smed file
-        #[arg(short, long)]
-        input: PathBuf,
-    },
     /// Extract tracks from a .smed file into a container (MP4/MKV/WEBM)
     Extract {
         /// Input .smed file
@@ -101,6 +94,13 @@ enum Commands {
         /// Output container file (.mp4 or .mkv)
         #[arg(short, long)]
         output: PathBuf,
+    },
+    /// Show information and verify cryptographic integrity of a .smed file
+    #[command(name = "verify-smed", alias = "VERIFY-SMED")]
+    VerifySmed {
+        /// Input .smed file
+        #[arg(short, long)]
+        input: PathBuf,
     },
     /// Verify embedded SignMedia metadata in an extracted container
     VerifyMetadata {
@@ -166,11 +166,11 @@ fn main() -> Result<()> {
                 track,
             )?;
         }
-        Commands::VerifySmed { input } => {
-            verify_smed_command(input)?;
-        }
         Commands::Extract { input, output } => {
             extract_command(input, output)?;
+        }
+        Commands::VerifySmed { input } => {
+            verify_smed_command(input)?;
         }
         Commands::VerifyMetadata { input } => {
             verify_metadata_command(input)?;
@@ -1385,32 +1385,24 @@ fn clip_command(
     // Enforce TTP oversight for clipping
     verify_manifest_signatures(&original_manifest, "Input manifest for clipping")?;
     let mut ancestry = Vec::new();
-    let (original_owd, original_signature, source_mapping, source_proofs) =
-        match &original_manifest.content {
-            ManifestContent::Original(owd) => (
-                owd.clone(),
-                original_manifest.signatures[0].signature.clone(),
-                None,
-                None,
-            ),
-            ManifestContent::Derivative(dwd) => {
-                ancestry.extend(dwd.ancestry.clone());
-                ancestry.push(original_manifest.clone());
-                let mapping = dwd
-                    .clip_mappings
-                    .get(0)
-                    .context("Missing clip mapping in derivative input")?;
-                let proofs = mapping.proofs.clone();
-                (
-                    dwd.original_owd.clone(),
-                    dwd.original_signature.clone(),
-                    Some(mapping.clone()),
-                    Some(proofs),
-                )
-            }
-        };
+    let (original_owd, original_signature, input_mappings) = match &original_manifest.content {
+        ManifestContent::Original(owd) => (
+            owd.clone(),
+            original_manifest.signatures[0].signature.clone(),
+            None,
+        ),
+        ManifestContent::Derivative(dwd) => {
+            ancestry.extend(dwd.ancestry.clone());
+            ancestry.push(original_manifest.clone());
+            (
+                dwd.original_owd.clone(),
+                dwd.original_signature.clone(),
+                Some(&dwd.clip_mappings),
+            )
+        }
+    };
 
-    let track = original_owd
+    let ref_track = original_owd
         .tracks
         .iter()
         .find(|t| t.track_id == track_id_to_clip)
@@ -1419,191 +1411,151 @@ fn clip_command(
             track_id_to_clip
         ))?
         .clone();
-    if track.codec.eq_ignore_ascii_case("raw") {
+    if ref_track.codec.eq_ignore_ascii_case("raw") {
         return Err(anyhow!(
-            "Track {} uses codec \"raw\"; clipping opaque containers is unsupported. Re-sign the input with a demuxable container (MP4/MKV/WEBM) or provide an elementary stream (H.264/H.265/AAC) so the track has a real codec.",
-            track.track_id
+            "Track {} uses codec \"raw\"; clipping opaque containers is unsupported.",
+            ref_track.track_id
         ));
     }
-    let track_id = track.track_id;
-    let total_chunks = track.total_chunks;
-    let track_entries = resolve_track_entries(&reader, &track, file_len);
-    let time_range = if start_time.is_some() || end_time.is_some() {
-        timecode::time_range_to_chunk_range(&track, &track_entries, start_time, end_time)
-    } else {
-        None
-    };
-    let (start, end) = if let Some((start, end)) = time_range {
-        (start, end)
-    } else {
-        let start = start.ok_or_else(|| {
-            anyhow!("--start is required when timestamps are unavailable for this track")
-        })?;
-        let end = end.ok_or_else(|| {
-            anyhow!("--end is required when timestamps are unavailable for this track")
-        })?;
-        (start, end)
-    };
-    let (start, end) = if matches!(track.codec.as_str(), "h264" | "h265" | "hevc") {
-        let adjusted_start = find_idr_start(&mut reader, &track_entries, start)?;
-        if adjusted_start >= end {
+
+    let ref_entries = resolve_track_entries(&reader, &ref_track, file_len);
+    let (mut target_start_time, target_end_time) =
+        if let (Some(st), Some(et)) = (start_time, end_time) {
+            (st, et)
+        } else if let (Some(s), Some(e)) = (start, end) {
+            timecode::chunk_range_to_time_range(&ref_track, &ref_entries, s, e)
+                .context("Failed to determine time range from chunk range")?
+        } else if start_time.is_some() || end_time.is_some() {
+            let (s, e) = timecode::time_range_to_chunk_range(
+                &ref_track,
+                &ref_entries,
+                start_time,
+                end_time,
+            )
+            .context("Failed to determine chunk range for partial time range")?;
+            timecode::chunk_range_to_time_range(&ref_track, &ref_entries, s, e)
+                .context("Failed to resolve absolute time range")?
+        } else {
             return Err(anyhow!(
-                "Unable to find a keyframe before the requested clip range"
+                "Must provide either --start/--end or --start-time/--end-time"
             ));
-        }
-        (adjusted_start, end)
-    } else {
-        (start, end)
-    };
+        };
 
-    let mut clip_chunks = Vec::new();
-    let mut proofs = Vec::new();
-    if let (Some(mapping), Some(existing_proofs)) = (source_mapping, source_proofs) {
-        if start >= end {
-            return Err(anyhow!("Start index must be less than end index"));
-        }
-        if time_range.is_none() && end > existing_proofs.len() as u64 {
-            return Err(anyhow!("End index out of bounds for derivative input"));
-        }
-        let data_size = file_len - reader.data_start();
-        let mut current_offset = 0;
-        let chunk_lookup = reader
-            .chunk_index_for_track(mapping.track_id)
-            .map(|entries| {
-                let mut lookup = std::collections::HashMap::new();
-                for entry in entries {
-                    lookup.insert(entry.chunk_index, entry.clone());
+    // IDR adjustment: find the earliest IDR start across all video tracks
+    let mut min_adjusted_start_time = target_start_time;
+    for track in &original_owd.tracks {
+        if matches!(track.codec.as_str(), "h264" | "h265" | "hevc") {
+            let track_entries = resolve_track_entries(&reader, track, file_len);
+            if track_entries.is_empty() {
+                continue;
+            }
+            if let Some((s, _)) = timecode::time_range_to_chunk_range(
+                track,
+                &track_entries,
+                Some(target_start_time),
+                Some(target_end_time),
+            ) {
+                if let Ok(adjusted_start_chunk) = find_idr_start(&mut reader, &track_entries, s) {
+                    if let Some((chunk_time, _)) = timecode::chunk_range_to_time_range(
+                        track,
+                        &track_entries,
+                        adjusted_start_chunk,
+                        adjusted_start_chunk + 1,
+                    ) {
+                        if chunk_time < min_adjusted_start_time {
+                            min_adjusted_start_time = chunk_time;
+                        }
+                    }
                 }
-                lookup
-            });
-        for (index, proof) in existing_proofs.iter().enumerate() {
-            let proof_index = index as u64;
-            let proof_chunk_index = proof.chunk_index;
-            let in_range = if time_range.is_some() {
-                proof_chunk_index >= start && proof_chunk_index < end
-            } else {
-                proof_index >= start && proof_index < end
-            };
-            if in_range {
-                let chunk = if let Some(lookup) = &chunk_lookup {
-                    let entry = lookup
-                        .get(&proof.chunk_index)
-                        .context("Missing chunk index entry for proof")?;
-                    if entry.offset + entry.size > data_size {
-                        return Err(anyhow!(
-                            "Unexpected end of data while reading derivative chunks"
-                        ));
-                    }
-                    reader.read_variable_chunk(entry.offset, entry.size)?
-                } else {
-                    let size = proof.chunk_size;
-                    if current_offset + size > data_size {
-                        return Err(anyhow!(
-                            "Unexpected end of data while reading derivative chunks"
-                        ));
-                    }
-                    reader.read_variable_chunk(current_offset, size)?
-                };
-                clip_chunks.push(chunk);
-                proofs.push(proof.clone());
-            }
-            if chunk_lookup.is_none() {
-                current_offset += proof.chunk_size;
             }
         }
-        if proofs.is_empty() {
-            return Err(anyhow!("No chunks selected for derivative clip"));
+    }
+    target_start_time = min_adjusted_start_time;
+
+    let mut track_clip_results = Vec::new();
+    let mut final_clip_mappings = Vec::new();
+
+    for track in &original_owd.tracks {
+        let track_entries = resolve_track_entries(&reader, track, file_len);
+        if track_entries.is_empty() {
+            continue;
         }
-        let first_index = proofs
-            .first()
-            .map(|proof| proof.chunk_index)
-            .unwrap_or(mapping.start_chunk_index);
-        let last_index = proofs
-            .last()
-            .map(|proof| proof.chunk_index)
-            .unwrap_or(mapping.end_chunk_index.saturating_sub(1));
-        let start = first_index;
-        let end = last_index + 1;
-        let clipper_id = hex::encode(signing_key.verifying_key().to_bytes());
-        let authorship_fingerprint = Some(crypto::compute_derivative_fingerprint(&clipper_id));
-        let dwd = signmedia::models::DerivativeWorkDescriptor {
-            derivative_id: Uuid::new_v4(),
-            original_owd,
-            original_signature,
-            ancestry,
-            clipper_id,
-            authorship_fingerprint,
-            created_at: Utc::now(),
-            clip_mappings: vec![signmedia::models::ClipMapping {
-                track_id: mapping.track_id,
-                start_chunk_index: start,
-                end_chunk_index: end,
+
+        let range = timecode::time_range_to_chunk_range(
+            track,
+            &track_entries,
+            Some(target_start_time),
+            Some(target_end_time),
+        );
+        let (s, e) = match range {
+            Some(r) => r,
+            None => continue,
+        };
+
+        let mut clip_chunks = Vec::new();
+        let mut proofs = Vec::new();
+
+        if let Some(mappings) = input_mappings {
+            let mapping = mappings.iter().find(|m| m.track_id == track.track_id);
+            if let Some(m) = mapping {
+                let proof_map: HashMap<u64, &signmedia::models::MerkleProof> =
+                    m.proofs.iter().map(|p| (p.chunk_index, p)).collect();
+                for entry in &track_entries {
+                    if entry.chunk_index >= s && entry.chunk_index < e {
+                        let chunk = reader.read_variable_chunk(entry.offset, entry.size)?;
+                        let proof = proof_map.get(&entry.chunk_index).context(format!(
+                            "Missing proof for chunk {} in track {}",
+                            entry.chunk_index, track.track_id
+                        ))?;
+                        clip_chunks.push(chunk);
+                        proofs.push((*proof).clone());
+                    }
+                }
+            }
+        } else {
+            let mut original_hashes = Vec::new();
+            let mut sorted_entries = track_entries.clone();
+            sorted_entries.sort_by_key(|entry| entry.chunk_index);
+            for entry in &sorted_entries {
+                let chunk = reader.read_variable_chunk(entry.offset, entry.size)?;
+                original_hashes.push(crypto::hash_data(&chunk));
+            }
+            let tree = MerkleTree::new(original_hashes);
+
+            for entry in &track_entries {
+                if entry.chunk_index >= s && entry.chunk_index < e {
+                    let chunk = reader.read_variable_chunk(entry.offset, entry.size)?;
+                    let mut proof = tree.generate_proof(entry.chunk_index as usize, entry.pts);
+                    proof.chunk_size = entry.size;
+                    clip_chunks.push(chunk);
+                    proofs.push(proof);
+                }
+            }
+        }
+
+        if !clip_chunks.is_empty() {
+            final_clip_mappings.push(signmedia::models::ClipMapping {
+                track_id: track.track_id,
+                start_chunk_index: s,
+                end_chunk_index: e,
                 proofs: proofs.clone(),
-            }],
-        };
-
-        let content = ManifestContent::Derivative(dwd);
-        let content_hash = hash_manifest_content(&content)?;
-        let signature = crypto::sign(&content_hash, &signing_key);
-
-        let ttp_signer = crypto::get_ttp_signing_key()?;
-        let ttp_signature = crypto::sign_with_ttp(&content_hash, &ttp_signer);
-        let manifest = SignedManifest {
-            content,
-            signatures: vec![
-                signmedia::models::SignatureEntry {
-                    signature: hex::encode(signature.to_bytes()),
-                    public_key: hex::encode(signing_key.verifying_key().to_bytes()),
-                    display_name: clipper_display_name.clone(),
-                },
-                signmedia::models::SignatureEntry {
-                    signature: hex::encode(ttp_signature.to_bytes()),
-                    public_key: crypto::get_ttp_public_key(),
-                    display_name: Some(ttp_display_name()),
-                },
-            ],
-        };
-
-        let (track_table, chunk_table) =
-            build_track_tables(mapping.track_id, track.codec.clone(), &proofs, &clip_chunks)?;
-        let out_file = fs::File::create(&output)?;
-        let mut writer = SmedWriter::new(out_file);
-        writer.write_all(&manifest, &track_table, &chunk_table, &clip_chunks)?;
-
-        println!("Successfully created clip: {:?}", output);
-        return Ok(());
+            });
+            track_clip_results.push(TrackClipData {
+                track_id: track.track_id,
+                codec: track.codec.clone(),
+                proofs,
+                chunks: clip_chunks,
+            });
+        }
     }
 
-    if end > total_chunks {
-        return Err(anyhow!("End index out of bounds"));
-    }
-    if start >= end {
-        return Err(anyhow!("Start index must be less than end index"));
-    }
-
-    println!("Extracting original chunks and reconstructing Merkle tree...");
-    let mut original_hashes = Vec::new();
-    let mut entries = track_entries;
-    entries.sort_by_key(|entry| entry.chunk_index);
-    for entry in &entries {
-        let chunk = reader.read_variable_chunk(entry.offset, entry.size)?;
-        original_hashes.push(crypto::hash_data(&chunk));
-    }
-    let original_tree = MerkleTree::new(original_hashes);
-
-    for entry in entries
-        .iter()
-        .filter(|entry| entry.chunk_index >= start && entry.chunk_index < end)
-    {
-        let chunk = reader.read_variable_chunk(entry.offset, entry.size)?;
-        clip_chunks.push(chunk);
-        let mut proof = original_tree.generate_proof(entry.chunk_index as usize, entry.pts);
-        proof.chunk_size = entry.size;
-        proofs.push(proof);
+    if track_clip_results.is_empty() {
+        return Err(anyhow!("No chunks selected for clip across any tracks"));
     }
 
     let clipper_id = hex::encode(signing_key.verifying_key().to_bytes());
     let authorship_fingerprint = Some(crypto::compute_derivative_fingerprint(&clipper_id));
+    let final_track_count = final_clip_mappings.len();
     let dwd = signmedia::models::DerivativeWorkDescriptor {
         derivative_id: Uuid::new_v4(),
         original_owd,
@@ -1612,12 +1564,7 @@ fn clip_command(
         clipper_id,
         authorship_fingerprint,
         created_at: Utc::now(),
-        clip_mappings: vec![signmedia::models::ClipMapping {
-            track_id,
-            start_chunk_index: start,
-            end_chunk_index: end,
-            proofs: proofs.clone(),
-        }],
+        clip_mappings: final_clip_mappings,
     };
 
     let content = ManifestContent::Derivative(dwd);
@@ -1632,7 +1579,7 @@ fn clip_command(
             signmedia::models::SignatureEntry {
                 signature: hex::encode(author_signature.to_bytes()),
                 public_key: hex::encode(signing_key.verifying_key().to_bytes()),
-                display_name: clipper_display_name.clone(),
+                display_name: clipper_display_name,
             },
             signmedia::models::SignatureEntry {
                 signature: hex::encode(ttp_signature.to_bytes()),
@@ -1642,52 +1589,63 @@ fn clip_command(
         ],
     };
 
-    let (track_table, chunk_table) =
-        build_track_tables(track_id, track.codec.clone(), &proofs, &clip_chunks)?;
-    let out_file = fs::File::create(&output)?;
-    let mut writer = SmedWriter::new(out_file);
-    writer.write_all(&manifest, &track_table, &chunk_table, &clip_chunks)?;
+    let (track_table, chunk_table) = build_track_tables(&track_clip_results)?;
+    let all_chunks: Vec<Vec<u8>> = track_clip_results
+        .into_iter()
+        .flat_map(|res| res.chunks)
+        .collect();
 
-    println!("Successfully created clip: {:?}", output);
+    let out_file = fs::File::create(&output).context("Failed to create output file")?;
+    let mut writer = SmedWriter::new(out_file);
+    writer.write_all(&manifest, &track_table, &chunk_table, &all_chunks)?;
+
+    println!("Successfully created clip with {} tracks: {:?}", final_track_count, output);
     Ok(())
 }
 
-fn build_track_tables(
+struct TrackClipData {
     track_id: u32,
     codec: String,
-    proofs: &[signmedia::models::MerkleProof],
-    chunks: &[Vec<u8>],
+    proofs: Vec<signmedia::models::MerkleProof>,
+    chunks: Vec<Vec<u8>>,
+}
+
+fn build_track_tables(
+    tracks_data: &[TrackClipData],
 ) -> Result<(Vec<TrackTableEntry>, Vec<ChunkTableEntry>)> {
-    let mut chunk_table = Vec::with_capacity(chunks.len());
-    let mut offset = 0u64;
-    for (index, chunk) in chunks.iter().enumerate() {
-        let size = chunk.len() as u64;
-        let chunk_index = proofs
-            .get(index)
-            .map(|proof| proof.chunk_index)
-            .unwrap_or(index as u64);
-        let pts = proofs.get(index).and_then(|proof| proof.pts);
-        chunk_table.push(ChunkTableEntry {
-            track_id,
-            chunk: TrackChunkIndexEntry {
-                chunk_index,
-                pts,
-                offset,
-                size,
-            },
-        });
-        offset += size;
-    }
-    let track_table = vec![TrackTableEntry {
-        track_id,
-        codec,
-        total_chunks: chunks.len() as u64,
-        chunk_size: chunks
+    let mut track_table = Vec::new();
+    let mut chunk_table = Vec::new();
+    let mut current_offset = 0u64;
+
+    for data in tracks_data {
+        for (index, chunk) in data.chunks.iter().enumerate() {
+            let size = chunk.len() as u64;
+            let proof = &data.proofs[index];
+            chunk_table.push(ChunkTableEntry {
+                track_id: data.track_id,
+                chunk: TrackChunkIndexEntry {
+                    chunk_index: proof.chunk_index,
+                    pts: proof.pts,
+                    offset: current_offset,
+                    size,
+                },
+            });
+            current_offset += size;
+        }
+
+        let max_chunk_size = data
+            .chunks
             .iter()
             .map(|chunk| chunk.len() as u64)
             .max()
-            .unwrap_or(0),
-        chunk_index_count: chunks.len() as u64,
-    }];
+            .unwrap_or(0);
+        track_table.push(TrackTableEntry {
+            track_id: data.track_id,
+            codec: data.codec.clone(),
+            total_chunks: data.chunks.len() as u64,
+            chunk_size: max_chunk_size,
+            chunk_index_count: data.chunks.len() as u64,
+        });
+    }
     Ok((track_table, chunk_table))
 }
