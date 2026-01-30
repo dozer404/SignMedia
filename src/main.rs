@@ -939,6 +939,9 @@ fn verify_metadata_command(input: PathBuf) -> Result<()> {
 struct ExtractTrackOutput {
     format: String,
     path: PathBuf,
+    timebase_num: Option<u32>,
+    timebase_den: Option<u32>,
+    codec: String,
 }
 
 fn ttp_display_name() -> String {
@@ -1220,7 +1223,20 @@ fn extract_command(input: PathBuf, output: PathBuf) -> Result<()> {
                 let bytes = hex::decode(extradata)
                     .context("Failed to decode codec extradata")?;
                 if !bytes.is_empty() {
-                    writer.write_all(&bytes)?;
+                    let mut already_prefixed = false;
+                    if let Some(first_entry) = entries.first() {
+                        // Check if the first chunk already starts with this exact extradata
+                        let first_chunk_prefix = reader.read_variable_chunk(
+                            first_entry.offset,
+                            first_entry.size.min(bytes.len() as u64),
+                        )?;
+                        if first_chunk_prefix == bytes {
+                            already_prefixed = true;
+                        }
+                    }
+                    if !already_prefixed {
+                        writer.write_all(&bytes)?;
+                    }
                 }
             }
         }
@@ -1234,6 +1250,9 @@ fn extract_command(input: PathBuf, output: PathBuf) -> Result<()> {
         track_outputs.push(ExtractTrackOutput {
             format,
             path: track_path,
+            timebase_num: track.timebase_num,
+            timebase_den: track.timebase_den,
+            codec: track.codec.clone(),
         });
     }
 
@@ -1282,7 +1301,15 @@ fn mux_tracks_with_ffmpeg(
 ) -> Result<()> {
     let mut command = std::process::Command::new("ffmpeg");
     command.arg("-y");
+    command.arg("-fflags").arg("+genpts");
+    command.arg("-avoid_negative_ts").arg("make_zero");
+
     for track in tracks {
+        if let (Some(num), Some(den)) = (track.timebase_num, track.timebase_den) {
+            if num > 0 && den > 0 && matches!(track.codec.as_str(), "h264" | "h265" | "hevc") {
+                command.arg("-r").arg(format!("{}/{}", den, num));
+            }
+        }
         command.arg("-f").arg(&track.format);
         command.arg("-i").arg(&track.path);
     }
@@ -1548,7 +1575,7 @@ fn clip_command(
     {
         let chunk = reader.read_variable_chunk(entry.offset, entry.size)?;
         clip_chunks.push(chunk);
-        let mut proof = original_tree.generate_proof(entry.chunk_index as usize);
+        let mut proof = original_tree.generate_proof(entry.chunk_index as usize, entry.pts);
         proof.chunk_size = entry.size;
         proofs.push(proof);
     }
@@ -1617,11 +1644,12 @@ fn build_track_tables(
             .get(index)
             .map(|proof| proof.chunk_index)
             .unwrap_or(index as u64);
+        let pts = proofs.get(index).and_then(|proof| proof.pts);
         chunk_table.push(ChunkTableEntry {
             track_id,
             chunk: TrackChunkIndexEntry {
                 chunk_index,
-                pts: None,
+                pts,
                 offset,
                 size,
             },
