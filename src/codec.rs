@@ -1,5 +1,8 @@
-use std::io::Read;
-use anyhow::Result;
+use anyhow::{anyhow, Context, Result};
+use std::fs;
+use std::io::{Read, Write};
+use std::process::Command;
+use uuid::Uuid;
 
 pub struct ChunkWithMeta {
     pub data: Vec<u8>,
@@ -8,6 +11,7 @@ pub struct ChunkWithMeta {
 
 pub struct TrackPlaybackInfo {
     pub codec: String,
+    pub container_type: Option<String>,
     pub codec_extradata: Option<Vec<u8>>,
     pub width: Option<u32>,
     pub height: Option<u32>,
@@ -23,17 +27,67 @@ pub fn chunk_media(
 ) -> Result<(Vec<ChunkWithMeta>, TrackPlaybackInfo)> {
     let mut data = Vec::new();
     reader.read_to_end(&mut data)?;
-    if let Some(info) = parse_adts_frames(&data) {
-        let chunks = group_adts_frames(&data, &info.frames, max_chunk_size);
+    if let Some(container_type) = detect_container_type(&data) {
+        if let Some(demuxed) = demux_container_stream(&data, &container_type)? {
+            if let Some(result) =
+                chunk_media_from_bytes(&demuxed, max_chunk_size, Some(container_type.clone()))
+            {
+                return Ok(result);
+            }
+        }
+        return Ok((
+            fallback_chunking(&data, max_chunk_size),
+            TrackPlaybackInfo {
+                codec: "raw".to_string(),
+                container_type: Some(container_type),
+                codec_extradata: None,
+                width: None,
+                height: None,
+                sample_rate: None,
+                channels: None,
+                timebase_num: None,
+                timebase_den: None,
+            },
+        ));
+    }
+
+    if let Some(result) = chunk_media_from_bytes(&data, max_chunk_size, None) {
+        return Ok(result);
+    }
+
+    Ok((
+        fallback_chunking(&data, max_chunk_size),
+        TrackPlaybackInfo {
+            codec: "raw".to_string(),
+            container_type: None,
+            codec_extradata: None,
+            width: None,
+            height: None,
+            sample_rate: None,
+            channels: None,
+            timebase_num: None,
+            timebase_den: None,
+        },
+    ))
+}
+
+fn chunk_media_from_bytes(
+    data: &[u8],
+    max_chunk_size: u64,
+    container_type: Option<String>,
+) -> Option<(Vec<ChunkWithMeta>, TrackPlaybackInfo)> {
+    if let Some(info) = parse_adts_frames(data) {
+        let chunks = group_adts_frames(data, &info.frames, max_chunk_size);
         let codec_extradata = build_aac_extradata(
             info.audio_object_type,
             info.sample_rate_index,
             info.channel_config,
         );
-        return Ok((
+        return Some((
             chunks,
             TrackPlaybackInfo {
                 codec: "aac".to_string(),
+                container_type,
                 codec_extradata: Some(codec_extradata),
                 width: None,
                 height: None,
@@ -50,16 +104,17 @@ pub fn chunk_media(
             },
         ));
     }
-    if let Some(info) = parse_annexb_nals(&data) {
-        let chunks = group_nals(&data, &info.nals, max_chunk_size);
+    if let Some(info) = parse_annexb_nals(data) {
+        let chunks = group_nals(data, &info.nals, max_chunk_size);
         let codec = match info.codec {
             AnnexbCodec::H264 => "h264",
             AnnexbCodec::H265 => "h265",
         };
-        return Ok((
+        return Some((
             chunks,
             TrackPlaybackInfo {
                 codec: codec.to_string(),
+                container_type,
                 codec_extradata: info.codec_extradata,
                 width: info.width,
                 height: info.height,
@@ -70,19 +125,123 @@ pub fn chunk_media(
             },
         ));
     }
-    Ok((
-        fallback_chunking(&data, max_chunk_size),
-        TrackPlaybackInfo {
-            codec: "raw".to_string(),
-            codec_extradata: None,
-            width: None,
-            height: None,
-            sample_rate: None,
-            channels: None,
-            timebase_num: None,
-            timebase_den: None,
-        },
-    ))
+    None
+}
+
+fn detect_container_type(data: &[u8]) -> Option<String> {
+    if looks_like_isobmff(data) {
+        return Some("mp4".to_string());
+    }
+    if data.len() >= 4 && data.starts_with(&[0x1A, 0x45, 0xDF, 0xA3]) {
+        let scan_len = data.len().min(4096);
+        let header = &data[..scan_len];
+        if header
+            .windows(4)
+            .any(|window| window.eq_ignore_ascii_case(b"webm"))
+        {
+            return Some("webm".to_string());
+        }
+        if header
+            .windows(8)
+            .any(|window| window.eq_ignore_ascii_case(b"matroska"))
+        {
+            return Some("mkv".to_string());
+        }
+        return Some("mkv".to_string());
+    }
+    None
+}
+
+fn demux_container_stream(data: &[u8], container_type: &str) -> Result<Option<Vec<u8>>> {
+    let temp_dir = std::env::temp_dir().join(format!("smed-demux-{}", Uuid::new_v4()));
+    fs::create_dir_all(&temp_dir).context("Failed to create temp directory")?;
+    let input_path = temp_dir.join(format!("input.{}", container_type));
+    let mut file = fs::File::create(&input_path).context("Failed to create temp input file")?;
+    file.write_all(data)
+        .context("Failed to write temp input file")?;
+    drop(file);
+
+    #[derive(serde::Deserialize)]
+    struct FfprobeStream {
+        index: Option<u32>,
+        codec_name: Option<String>,
+        codec_type: Option<String>,
+    }
+    #[derive(serde::Deserialize)]
+    struct FfprobeOutput {
+        streams: Option<Vec<FfprobeStream>>,
+    }
+
+    let probe = Command::new("ffprobe")
+        .args(["-v", "quiet", "-print_format", "json", "-show_streams"])
+        .arg(&input_path)
+        .output()
+        .context("Failed to invoke ffprobe for demux")?;
+
+    if !probe.status.success() {
+        let _ = fs::remove_file(&input_path);
+        let _ = fs::remove_dir(&temp_dir);
+        return Err(anyhow!("ffprobe failed with status {}", probe.status));
+    }
+
+    let parsed: FfprobeOutput =
+        serde_json::from_slice(&probe.stdout).context("Failed to parse ffprobe JSON")?;
+    let streams = parsed.streams.unwrap_or_default();
+    let mut selected = streams
+        .iter()
+        .find(|stream| stream.codec_type.as_deref() == Some("video"))
+        .or_else(|| streams.iter().find(|stream| stream.codec_type.as_deref() == Some("audio")))
+        .or_else(|| streams.first());
+
+    let Some(stream) = selected.take() else {
+        let _ = fs::remove_file(&input_path);
+        let _ = fs::remove_dir(&temp_dir);
+        return Ok(None);
+    };
+
+    let index = stream.index.context("Missing stream index")?;
+    let codec_name = stream
+        .codec_name
+        .clone()
+        .unwrap_or_else(|| "unknown".to_string())
+        .to_ascii_lowercase();
+    let (codec, format, bitstream_filter) = match codec_name.as_str() {
+        "h264" => ("h264", "h264", Some("h264_mp4toannexb")),
+        "hevc" | "h265" => ("h265", "hevc", Some("hevc_mp4toannexb")),
+        "aac" => ("aac", "adts", None),
+        _ => {
+            let _ = fs::remove_file(&input_path);
+            let _ = fs::remove_dir(&temp_dir);
+            return Ok(None);
+        }
+    };
+
+    let output_path = temp_dir.join(format!("stream-{}.bin", codec));
+    let mut command = Command::new("ffmpeg");
+    command.arg("-y");
+    command.arg("-i").arg(&input_path);
+    command.arg("-map").arg(format!("0:{}", index));
+    command.arg("-c").arg("copy");
+    if let Some(filter) = bitstream_filter {
+        command.arg("-bsf:v").arg(filter);
+    }
+    command.arg("-f").arg(format).arg(&output_path);
+
+    let status = command
+        .status()
+        .context("Failed to invoke ffmpeg for demux")?;
+    if !status.success() {
+        let _ = fs::remove_file(&input_path);
+        let _ = fs::remove_file(&output_path);
+        let _ = fs::remove_dir(&temp_dir);
+        return Err(anyhow!("ffmpeg demux failed with status {}", status));
+    }
+
+    let demuxed = fs::read(&output_path).context("Failed to read demuxed stream data")?;
+    let _ = fs::remove_file(&input_path);
+    let _ = fs::remove_file(&output_path);
+    let _ = fs::remove_dir(&temp_dir);
+    Ok(Some(demuxed))
 }
 
 pub struct AdtsParseInfo {
@@ -331,7 +490,7 @@ pub fn parse_annexb_nals(data: &[u8]) -> Option<AnnexbParseInfo> {
     let (codec_extradata, width, height, timebase_num, timebase_den) = match codec {
         AnnexbCodec::H264 => match (sps.as_deref(), pps.as_deref()) {
             (Some(sps_bytes), Some(pps_bytes)) => {
-                let extradata = build_avcc_extradata(sps_bytes, pps_bytes);
+                let extradata = build_annexb_extradata(&[sps_bytes, pps_bytes]);
                 let (width, height) = parse_h264_sps_dimensions(sps_bytes).unwrap_or((0, 0));
                 let timing = parse_h264_sps_timing(sps_bytes);
                 let (timebase_num, timebase_den) = timing
@@ -348,18 +507,17 @@ pub fn parse_annexb_nals(data: &[u8]) -> Option<AnnexbParseInfo> {
             _ => (None, None, None, None, None),
         },
         AnnexbCodec::H265 => {
-            // H.265 extradata (HVCC) is complex to build, for now we might just concatenate or provide a placeholder
-            // In a real implementation we'd follow ISO/IEC 14496-15
-            let mut extradata = Vec::new();
-            if let Some(v) = &vps {
-                extradata.extend_from_slice(v);
+            let mut units = Vec::new();
+            if let Some(v) = vps.as_deref() {
+                units.push(v);
             }
-            if let Some(s) = &sps {
-                extradata.extend_from_slice(s);
+            if let Some(s) = sps.as_deref() {
+                units.push(s);
             }
-            if let Some(p) = &pps {
-                extradata.extend_from_slice(p);
+            if let Some(p) = pps.as_deref() {
+                units.push(p);
             }
+            let extradata = build_annexb_extradata(&units);
             (
                 if extradata.is_empty() {
                     None
@@ -492,6 +650,18 @@ pub fn build_avcc_extradata(sps: &[u8], pps: &[u8]) -> Vec<u8> {
     extradata.push(1); // numOfPictureParameterSets = 1
     extradata.extend_from_slice(&(pps.len() as u16).to_be_bytes());
     extradata.extend_from_slice(pps);
+    extradata
+}
+
+pub fn build_annexb_extradata(units: &[&[u8]]) -> Vec<u8> {
+    let mut extradata = Vec::new();
+    for unit in units {
+        if unit.is_empty() {
+            continue;
+        }
+        extradata.extend_from_slice(&[0, 0, 0, 1]);
+        extradata.extend_from_slice(unit);
+    }
     extradata
 }
 
