@@ -24,6 +24,8 @@ pub struct TrackMetadata {
     pub track_id: u32,
     pub codec: String,
     #[serde(default)]
+    pub container_type: Option<String>,
+    #[serde(default)]
     pub codec_extradata: Option<String>, // Hex encoded
     #[serde(default)]
     pub width: Option<u32>,
