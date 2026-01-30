@@ -70,6 +70,9 @@ enum Commands {
         /// Private key file (for the clipper)
         #[arg(short, long)]
         key: PathBuf,
+        /// Display name for the clipper
+        #[arg(long)]
+        clipper_name: Option<String>,
         /// Output .smed file
         #[arg(short, long)]
         output: PathBuf,
@@ -151,6 +154,7 @@ fn main() -> Result<()> {
         Commands::Clip {
             input,
             key,
+            clipper_name,
             output,
             start,
             end,
@@ -158,7 +162,17 @@ fn main() -> Result<()> {
             end_time,
             track,
         } => {
-            clip_command(input, key, output, start, end, start_time, end_time, track)?;
+            clip_command(
+                input,
+                key,
+                clipper_name,
+                output,
+                start,
+                end,
+                start_time,
+                end_time,
+                track,
+            )?;
         }
         Commands::Info { input } => {
             info_command(input)?;
@@ -734,7 +748,21 @@ fn info_command(input: PathBuf) -> Result<()> {
             }
         }
         ManifestContent::Derivative(dwd) => {
-            author_key_names.insert(dwd.clipper_id.clone(), "Clipper".to_string());
+            let clipper_name = manifest
+                .signatures
+                .iter()
+                .find(|sig| sig.public_key == dwd.clipper_id)
+                .and_then(|sig| sig.display_name.clone())
+                .and_then(|name| {
+                    let trimmed = name.trim();
+                    if trimmed.is_empty() {
+                        None
+                    } else {
+                        Some(trimmed.to_string())
+                    }
+                });
+            let label = clipper_name.unwrap_or_else(|| "Clipper".to_string());
+            author_key_names.insert(dwd.clipper_id.clone(), label);
         }
     }
 
@@ -1249,6 +1277,7 @@ fn remux_container_with_ffmpeg(
 fn clip_command(
     input: PathBuf,
     key_path: PathBuf,
+    clipper_name: Option<String>,
     output: PathBuf,
     start: Option<u64>,
     end: Option<u64>,
@@ -1261,6 +1290,14 @@ fn clip_command(
         .try_into()
         .map_err(|_| anyhow!("Invalid key size"))?;
     let signing_key = SigningKey::from_bytes(&key_array);
+    let clipper_display_name = clipper_name.and_then(|name| {
+        let trimmed = name.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    });
 
     let file = fs::File::open(&input).context("Failed to open input file")?;
     let file_len = file.metadata()?.len();
@@ -1423,7 +1460,7 @@ fn clip_command(
                 signmedia::models::SignatureEntry {
                     signature: hex::encode(signature.to_bytes()),
                     public_key: hex::encode(signing_key.verifying_key().to_bytes()),
-                    display_name: None,
+                    display_name: clipper_display_name.clone(),
                 },
                 signmedia::models::SignatureEntry {
                     signature: hex::encode(ttp_signature.to_bytes()),
@@ -1501,7 +1538,7 @@ fn clip_command(
             signmedia::models::SignatureEntry {
                 signature: hex::encode(author_signature.to_bytes()),
                 public_key: hex::encode(signing_key.verifying_key().to_bytes()),
-                display_name: None,
+                display_name: clipper_display_name.clone(),
             },
             signmedia::models::SignatureEntry {
                 signature: hex::encode(ttp_signature.to_bytes()),
