@@ -1100,7 +1100,7 @@ fn extract_command(input: PathBuf, output: PathBuf) -> Result<()> {
         if track.codec.eq_ignore_ascii_case("raw") {
             let temp_dir = std::env::temp_dir().join(format!("smed-extract-{}", Uuid::new_v4()));
             fs::create_dir_all(&temp_dir).context("Failed to create temp directory")?;
-            let temp_path = temp_dir.join(format!("raw-track.{}", output_ext));
+            let temp_path = temp_dir.join("raw-track.bin");
             extract_raw_track_passthrough(
                 &mut reader,
                 track,
@@ -1434,7 +1434,7 @@ fn clip_command(
         };
 
         let (track_table, chunk_table) =
-            build_track_tables(mapping.track_id, &proofs, &clip_chunks)?;
+            build_track_tables(mapping.track_id, track.codec.clone(), &proofs, &clip_chunks)?;
         let out_file = fs::File::create(&output)?;
         let mut writer = SmedWriter::new(out_file);
         writer.write_all(&manifest, &track_table, &chunk_table, &clip_chunks)?;
@@ -1511,7 +1511,8 @@ fn clip_command(
         ],
     };
 
-    let (track_table, chunk_table) = build_track_tables(track_id, &proofs, &clip_chunks)?;
+    let (track_table, chunk_table) =
+        build_track_tables(track_id, track.codec.clone(), &proofs, &clip_chunks)?;
     let out_file = fs::File::create(&output)?;
     let mut writer = SmedWriter::new(out_file);
     writer.write_all(&manifest, &track_table, &chunk_table, &clip_chunks)?;
@@ -1522,6 +1523,7 @@ fn clip_command(
 
 fn build_track_tables(
     track_id: u32,
+    codec: String,
     proofs: &[signmedia::models::MerkleProof],
     chunks: &[Vec<u8>],
 ) -> Result<(Vec<TrackTableEntry>, Vec<ChunkTableEntry>)> {
@@ -1546,7 +1548,7 @@ fn build_track_tables(
     }
     let track_table = vec![TrackTableEntry {
         track_id,
-        codec: "raw".to_string(),
+        codec,
         total_chunks: chunks.len() as u64,
         chunk_size: chunks
             .iter()
