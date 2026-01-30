@@ -207,7 +207,7 @@ Sign a file and create a `.smed` container:
 
 ### Create a clip (00:10 - 00:25)
 
-    clip original.smed --start 10 --end 25 --editor-key editor.priv --output clip.smed
+    clip --input original.smed --start 10 --end 25 --editor-key editor.priv --output clip.smed
 
 ## Get SMED metadata info
 
