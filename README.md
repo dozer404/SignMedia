@@ -112,7 +112,8 @@ SignMedia introduces a `.smed` container with:
 -   Optional embedded key/cert bundles
 
 Decoders can extract embedded bitstreams and pipe them to standard
-decoders like FFmpeg.
+decoders like FFmpeg. SignMedia handles multi-track alignment and
+frame-accurate (or GOP-accurate) clipping for both video and audio.
 
 ------------------------------------------------------------------------
 
@@ -226,9 +227,11 @@ extracted to the same container extension they were originally signed with.
 
 ### Trusted Third Party (TTP) Setup
 
-SignMedia now requires a multi-signature for all operations (Original signing and Clipping). This is handled by a Trusted Third Party (TTP) key.
+SignMedia requires a multi-signature for all operations (Original signing and Clipping). This is handled by a Trusted Third Party (TTP) key.
 
 For this POC, the TTP public key is hardcoded. To perform signing or clipping, you must provide the TTP private key via the `SMED_TTP_PRIVATE_KEY` environment variable.
+
+You can set these in a `.env` file in the root directory:
 ```
 
 ## Format for `.env` or environment:
