@@ -112,7 +112,8 @@ SignMedia introduces a `.smed` container with:
 -   Optional embedded key/cert bundles
 
 Decoders can extract embedded bitstreams and pipe them to standard
-decoders like FFmpeg.
+decoders like FFmpeg. SignMedia handles multi-track alignment and
+frame-accurate (or GOP-accurate) clipping for both video and audio.
 
 ------------------------------------------------------------------------
 
@@ -179,10 +180,10 @@ Build the CLI:
 cargo build --release
 ```
 
-Generate a keypair (private key file + prints public key):
+Generate a keypair (saves private key and optionally public key, prints public key):
 
 ```bash
-cargo run -- gen-key --output key.priv
+cargo run -- gen-key --private key.priv --public key.pub
 ```
 
 Sign a file and create a `.smed` container:
@@ -199,7 +200,7 @@ Sign a file and create a `.smed` container:
 
 ### Create a private key
 
-    gen-key --output key.priv
+    gen-key --private key.priv
 
 ### Create a signed original
 
@@ -226,13 +227,12 @@ extracted to the same container extension they were originally signed with.
 ```
 ### Trusted Third Party (TTP) Setup
 
-
-
-## Format for `.env` or environment:
-
-SignMedia now requires a multi-signature for all operations (Original signing and Clipping). This is handled by a Trusted Third Party (TTP) key.
+SignMedia requires a multi-signature for all operations (Original signing and Clipping). This is handled by a Trusted Third Party (TTP) key.
 
 For this POC, the TTP public key is hardcoded. To perform signing or clipping, you must provide the TTP private key via the `SMED_TTP_PRIVATE_KEY` environment variable.
+
+You can set these in a `.env` file in the root directory:
+```
 
 ```bash
 # Hex-encoded 32-byte Ed25519 private key

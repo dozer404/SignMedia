@@ -48,10 +48,18 @@ pub fn time_range_to_chunk_range(
         Some(time) => seconds_to_pts_ceil(time, timebase_num, timebase_den)?,
         None => last_pts.saturating_add(1),
     };
-    let start_chunk = pts_entries
+
+    // start_chunk: the last chunk that starts at or before start_pts
+    let start_chunk = match pts_entries
         .iter()
-        .find(|(pts, _)| *pts >= start_pts)
-        .map(|(_, chunk_index)| *chunk_index)?;
+        .filter(|(pts, _)| *pts <= start_pts)
+        .last()
+    {
+        Some((_, chunk_index)) => *chunk_index,
+        None => pts_entries.first()?.1,
+    };
+
+    // end_chunk: the first chunk that starts at or after end_pts
     let end_chunk = match pts_entries
         .iter()
         .find(|(pts, _)| *pts >= end_pts)
@@ -76,18 +84,31 @@ pub fn chunk_range_to_time_range(
     end_chunk: u64,
 ) -> Option<(f64, f64)> {
     let (timebase_num, timebase_den) = (track.timebase_num?, track.timebase_den?);
-    let mut filtered: Vec<&TrackChunkIndexEntry> = entries
+    let mut sorted_entries = entries.to_vec();
+    sorted_entries.sort_by_key(|e| e.chunk_index);
+
+    let start_pts = sorted_entries
         .iter()
-        .filter(|entry| {
-            entry.pts.is_some() && entry.chunk_index >= start_chunk && entry.chunk_index < end_chunk
-        })
-        .collect();
-    if filtered.is_empty() {
-        return None;
-    }
-    filtered.sort_by_key(|entry| entry.chunk_index);
-    let start_pts = filtered.first()?.pts?;
-    let end_pts = filtered.last()?.pts?.saturating_add(1);
+        .find(|e| e.chunk_index >= start_chunk && e.pts.is_some())?
+        .pts?;
+
+    // The end time is the PTS of the first chunk we ARE NOT including.
+    // If that chunk doesn't exist, we estimate based on the last included chunk.
+    let end_pts = if let Some(e) = sorted_entries.iter().find(|e| e.chunk_index >= end_chunk && e.pts.is_some()) {
+        e.pts?
+    } else {
+        // Estimate: find the last included chunk and add a reasonable duration
+        let last_included = sorted_entries
+            .iter()
+            .filter(|e| e.chunk_index < end_chunk && e.pts.is_some())
+            .last()?;
+        let last_pts = last_included.pts?;
+
+        // Use 1 second as a default duration if we can't do better,
+        // but try to use the actual timebase to add at least one GOP/frame.
+        last_pts.saturating_add(timebase_den as i64 / timebase_num.max(1) as i64)
+    };
+
     let start_time = pts_to_seconds(start_pts, timebase_num, timebase_den)?;
     let end_time = pts_to_seconds(end_pts, timebase_num, timebase_den)?;
     Some((start_time, end_time))
