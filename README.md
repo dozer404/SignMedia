@@ -180,10 +180,10 @@ Build the CLI:
 cargo build --release
 ```
 
-Generate a keypair (private key file + prints public key):
+Generate a keypair (saves private key and optionally public key, prints public key):
 
 ```bash
-cargo run -- gen-key --output key.priv
+cargo run -- gen-key --output key.priv --public-output key.pub
 ```
 
 Sign a file and create a `.smed` container:
