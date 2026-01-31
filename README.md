@@ -160,8 +160,8 @@ Commands:
   gen-key          Generate a new Ed25519 keypair
   sign             Sign one or more media files and create a .smed container
   clip             Create a clip from a .smed file
-  verify-smed      Show information and verify cryptographic integrity of a .smed file
   extract          Extract tracks from a .smed file into a container (MP4/MKV/WEBM)
+  verify-smed      Show information and verify cryptographic integrity of a .smed file
   verify-metadata  Verify embedded SignMedia metadata in an extracted container
   help             Print this message or the help of the given subcommand(s)
 
