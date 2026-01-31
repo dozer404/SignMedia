@@ -3,8 +3,8 @@ use base64::{engine::general_purpose, Engine as _};
 use chrono::Utc;
 use clap::{Parser, Subcommand};
 use ed25519_dalek::{Signature, SigningKey, VerifyingKey};
-use signmedia::container::{ChunkTableEntry, SmedReader, SmedWriter, TrackTableEntry};
 use signmedia::codec;
+use signmedia::container::{ChunkTableEntry, SmedReader, SmedWriter, TrackTableEntry};
 use signmedia::crypto::{self, MerkleTree};
 use signmedia::models::{
     ManifestContent, OriginalWorkDescriptor, SignedManifest, TrackChunkIndexEntry, TrackMetadata,
@@ -321,9 +321,7 @@ fn find_idr_start<R: Read + Seek>(
     }
     let start_index = start.min(entries.len().saturating_sub(1) as u64);
     for idx in (0..=start_index).rev() {
-        let entry = entries
-            .get(idx as usize)
-            .context("Missing chunk entry")?;
+        let entry = entries.get(idx as usize).context("Missing chunk entry")?;
         let data = reader.read_variable_chunk(entry.offset, entry.size)?;
         if let Some(info) = codec::parse_annexb_nals(&data) {
             if info.nals.iter().any(|nal| nal.is_idr) {
@@ -356,74 +354,81 @@ fn sign_command(
     let mut track_table = Vec::new();
     let mut chunk_table = Vec::with_capacity(inputs.len() * 10); // heuristic
     let mut global_offset = 0u64;
+    let mut next_track_id = 0u32;
 
-    for (track_idx, input) in inputs.iter().enumerate() {
-        let track_id = track_idx as u32;
+    for input in inputs.iter() {
         let file =
             fs::File::open(input).context(format!("Failed to open input file {:?}", input))?;
         let mut reader = BufReader::new(file);
 
-        let mut current_track_chunks = Vec::new();
-        let mut chunk_hashes = Vec::new();
-        let mut first_chunk_data = None;
-        let (chunked, playback_info) = codec::chunk_media(&mut reader, max_chunk_size)?;
-        let mut track_chunk_index = Vec::with_capacity(chunked.len());
+        let chunked_tracks = codec::chunk_media_tracks(&mut reader, max_chunk_size)?;
 
-        for (index, chunk) in chunked.into_iter().enumerate() {
-            let size = chunk.data.len() as u64;
-            if first_chunk_data.is_none() {
-                first_chunk_data = Some(chunk.data.clone());
+        for track in chunked_tracks {
+            let track_id = next_track_id;
+            next_track_id = next_track_id.saturating_add(1);
+
+            let mut current_track_chunks = Vec::new();
+            let mut chunk_hashes = Vec::new();
+            let mut first_chunk_data = None;
+            let mut track_chunk_index = Vec::with_capacity(track.chunks.len());
+
+            for (index, chunk) in track.chunks.into_iter().enumerate() {
+                let size = chunk.data.len() as u64;
+                if first_chunk_data.is_none() {
+                    first_chunk_data = Some(chunk.data.clone());
+                }
+                chunk_hashes.push(crypto::hash_data(&chunk.data));
+                let entry = TrackChunkIndexEntry {
+                    chunk_index: index as u64,
+                    pts: chunk.pts,
+                    offset: global_offset,
+                    size,
+                };
+                track_chunk_index.push(entry.clone());
+                chunk_table.push(ChunkTableEntry {
+                    track_id,
+                    chunk: entry,
+                });
+                global_offset += size;
+                current_track_chunks.push(chunk.data);
             }
-            chunk_hashes.push(crypto::hash_data(&chunk.data));
-            let entry = TrackChunkIndexEntry {
-                chunk_index: index as u64,
-                pts: chunk.pts,
-                offset: global_offset,
-                size,
-            };
-            track_chunk_index.push(entry.clone());
-            chunk_table.push(ChunkTableEntry {
+
+            let tree = MerkleTree::new(chunk_hashes);
+            let root = tree.root();
+            let p_hash = first_chunk_data.and_then(|data| crypto::compute_perceptual_hash(&data));
+
+            track_metadata.push(TrackMetadata {
                 track_id,
-                chunk: entry,
+                codec: track.playback.codec.clone(),
+                container_type: track.playback.container_type.clone(),
+                codec_extradata: track
+                    .playback
+                    .codec_extradata
+                    .as_ref()
+                    .map(|data| hex::encode(data)),
+                width: track.playback.width,
+                height: track.playback.height,
+                sample_rate: track.playback.sample_rate,
+                channel_count: track.playback.channels,
+                timebase_num: track.playback.timebase_num,
+                timebase_den: track.playback.timebase_den,
+                merkle_root: hex::encode(root),
+                perceptual_hash: p_hash,
+                total_chunks: current_track_chunks.len() as u64,
+                chunk_size: max_chunk_size,
+                chunk_index: track_chunk_index,
             });
-            global_offset += size;
-            current_track_chunks.push(chunk.data);
+
+            track_table.push(TrackTableEntry {
+                track_id,
+                codec: track.playback.codec,
+                total_chunks: current_track_chunks.len() as u64,
+                chunk_size: max_chunk_size,
+                chunk_index_count: current_track_chunks.len() as u64,
+            });
+
+            all_chunks.extend(current_track_chunks);
         }
-
-        let tree = MerkleTree::new(chunk_hashes);
-        let root = tree.root();
-        let p_hash = first_chunk_data.and_then(|data| crypto::compute_perceptual_hash(&data));
-
-        track_metadata.push(TrackMetadata {
-            track_id,
-            codec: playback_info.codec.clone(),
-            container_type: playback_info.container_type.clone(),
-            codec_extradata: playback_info
-                .codec_extradata
-                .as_ref()
-                .map(|data| hex::encode(data)),
-            width: playback_info.width,
-            height: playback_info.height,
-            sample_rate: playback_info.sample_rate,
-            channel_count: playback_info.channels,
-            timebase_num: playback_info.timebase_num,
-            timebase_den: playback_info.timebase_den,
-            merkle_root: hex::encode(root),
-            perceptual_hash: p_hash,
-            total_chunks: current_track_chunks.len() as u64,
-            chunk_size: max_chunk_size,
-            chunk_index: track_chunk_index,
-        });
-
-        track_table.push(TrackTableEntry {
-            track_id,
-            codec: playback_info.codec,
-            total_chunks: current_track_chunks.len() as u64,
-            chunk_size: max_chunk_size,
-            chunk_index_count: current_track_chunks.len() as u64,
-        });
-
-        all_chunks.extend(current_track_chunks);
     }
 
     let normalized_role = author_role.to_ascii_lowercase();
@@ -708,6 +713,15 @@ fn print_smed_info<R: Read + Seek>(reader: &SmedReader<R>, input: &PathBuf) -> R
     println!("File: {:?}", input);
 
     let manifest = &reader.manifest;
+    let track_map: HashMap<u32, &TrackMetadata> = match &manifest.content {
+        ManifestContent::Original(owd) => owd.tracks.iter().map(|t| (t.track_id, t)).collect(),
+        ManifestContent::Derivative(dwd) => dwd
+            .original_owd
+            .tracks
+            .iter()
+            .map(|t| (t.track_id, t))
+            .collect(),
+    };
     match &manifest.content {
         ManifestContent::Original(owd) => {
             println!("Type: Original Work");
@@ -724,8 +738,12 @@ fn print_smed_info<R: Read + Seek>(reader: &SmedReader<R>, input: &PathBuf) -> R
             println!("Tracks: {}", owd.tracks.len());
             for track in &owd.tracks {
                 println!(
-                    "  Track {}: Codec: {}, Chunks: {}, Root: {}",
-                    track.track_id, track.codec, track.total_chunks, track.merkle_root
+                    "  Track {} ({}): Codec: {}, Chunks: {}, Root: {}",
+                    track.track_id,
+                    track_type_label(track),
+                    track.codec,
+                    track.total_chunks,
+                    track.merkle_root
                 );
             }
         }
@@ -747,9 +765,13 @@ fn print_smed_info<R: Read + Seek>(reader: &SmedReader<R>, input: &PathBuf) -> R
             println!("Ancestry: {} levels", dwd.ancestry.len());
             println!("Clip Mappings: {}", dwd.clip_mappings.len());
             for mapping in &dwd.clip_mappings {
+                let label = track_map
+                    .get(&mapping.track_id)
+                    .map(|track| track_type_label(track))
+                    .unwrap_or("Unknown");
                 println!(
-                    "  Track {}: Chunks {}..{}",
-                    mapping.track_id, mapping.start_chunk_index, mapping.end_chunk_index
+                    "  Track {} ({}): Chunks {}..{}",
+                    mapping.track_id, label, mapping.start_chunk_index, mapping.end_chunk_index
                 );
             }
         }
@@ -758,9 +780,13 @@ fn print_smed_info<R: Read + Seek>(reader: &SmedReader<R>, input: &PathBuf) -> R
     if !reader.track_table.is_empty() {
         println!("Container Track Table:");
         for entry in &reader.track_table {
+            let label = track_map
+                .get(&entry.track_id)
+                .map(|track| track_type_label(track))
+                .unwrap_or("Unknown");
             println!(
-                "  Track {}: Codec: {}, Total Chunks: {}",
-                entry.track_id, entry.codec, entry.total_chunks
+                "  Track {} ({}): Codec: {}, Total Chunks: {}",
+                entry.track_id, label, entry.codec, entry.total_chunks
             );
         }
     }
@@ -1116,6 +1142,49 @@ fn extract_raw_track_passthrough(
     Ok(())
 }
 
+fn output_ext_matches_container(output_ext: &str, container_type: &str) -> bool {
+    let output_ext = output_ext.to_ascii_lowercase();
+    let container_type = container_type.to_ascii_lowercase();
+    match container_type.as_str() {
+        "jpg" | "jpeg" => matches!(output_ext.as_str(), "jpg" | "jpeg"),
+        "heic" | "heif" => matches!(output_ext.as_str(), "heic" | "heif"),
+        "png" | "gif" | "webp" => output_ext == container_type,
+        _ => output_ext == container_type,
+    }
+}
+
+fn track_type_label(track: &TrackMetadata) -> &'static str {
+    let codec = track.codec.to_ascii_lowercase();
+    if let Some(container_type) = track.container_type.as_deref() {
+        let container_type = container_type.to_ascii_lowercase();
+        if matches!(
+            container_type.as_str(),
+            "png" | "jpg" | "jpeg" | "gif" | "webp" | "heic" | "heif"
+        ) {
+            return "Image";
+        }
+    }
+    if track.width.is_some()
+        || track.height.is_some()
+        || matches!(
+            codec.as_str(),
+            "h264" | "h265" | "hevc" | "av1" | "vp9" | "vp8" | "mpeg4" | "mpeg2video"
+        )
+    {
+        return "Video";
+    }
+    if track.sample_rate.is_some()
+        || track.channel_count.is_some()
+        || matches!(
+            codec.as_str(),
+            "aac" | "opus" | "flac" | "mp3" | "vorbis" | "pcm" | "alac"
+        )
+    {
+        return "Audio";
+    }
+    "Unknown"
+}
+
 fn verify_smed_command(input: PathBuf) -> Result<()> {
     let file_len = fs::metadata(&input)?.len();
     let mut reader = open_smed_reader(&input)?;
@@ -1163,11 +1232,37 @@ fn extract_command(input: PathBuf, output: PathBuf) -> Result<()> {
         .and_then(|ext| ext.to_str())
         .map(|ext| ext.to_ascii_lowercase())
         .unwrap_or_default();
-    if output_ext != "mkv" && output_ext != "mp4" && output_ext != "webm" {
-        return Err(anyhow!(
-            "Unsupported output container: {:?} (expected .mp4, .mkv, or .webm)",
-            output
-        ));
+    let is_mux_container = matches!(output_ext.as_str(), "mkv" | "mp4" | "webm");
+    if !is_mux_container {
+        if track_ids.len() != 1 {
+            return Err(anyhow!(
+                "Unsupported output container: {:?} (expected .mp4, .mkv, or .webm)",
+                output
+            ));
+        }
+        let track = tracks_by_id
+            .get(&track_ids[0])
+            .context(format!("Missing track metadata for track {}", track_ids[0]))?;
+        if !track.codec.eq_ignore_ascii_case("raw") {
+            return Err(anyhow!(
+                "Unsupported output container: {:?} (expected .mp4, .mkv, or .webm)",
+                output
+            ));
+        }
+        let Some(container_type) = track.container_type.as_deref() else {
+            return Err(anyhow!(
+                "Unsupported output container: {:?} (expected .mp4, .mkv, or .webm)",
+                output
+            ));
+        };
+        if !output_ext_matches_container(&output_ext, container_type) {
+            return Err(anyhow!(
+                "Track {} is a raw {} container; output extension .{} does not match",
+                track.track_id,
+                container_type,
+                output_ext
+            ));
+        }
     }
 
     let metadata = build_extract_metadata(&reader.manifest)?;
@@ -1184,7 +1279,7 @@ fn extract_command(input: PathBuf, output: PathBuf) -> Result<()> {
                     track_id
                 ));
             };
-            if output_ext != container_type {
+            if !output_ext_matches_container(&output_ext, container_type) {
                 return Err(anyhow!(
                     "Track {} is a raw {} container; output extension .{} does not match",
                     track_id,
@@ -1192,13 +1287,7 @@ fn extract_command(input: PathBuf, output: PathBuf) -> Result<()> {
                     output_ext
                 ));
             }
-            extract_raw_track_passthrough(
-                &mut reader,
-                track,
-                file_len,
-                track_ids.len(),
-                &output,
-            )?;
+            extract_raw_track_passthrough(&mut reader, track, file_len, track_ids.len(), &output)?;
             println!("Extracted container written to {:?}", output);
             return Ok(());
         }
@@ -1243,8 +1332,7 @@ fn extract_command(input: PathBuf, output: PathBuf) -> Result<()> {
         );
         if matches!(track.codec.as_str(), "h264" | "h265" | "hevc") {
             if let Some(extradata) = &track.codec_extradata {
-                let bytes = hex::decode(extradata)
-                    .context("Failed to decode codec extradata")?;
+                let bytes = hex::decode(extradata).context("Failed to decode codec extradata")?;
                 if !bytes.is_empty() {
                     let mut already_prefixed = false;
                     if let Some(first_entry) = entries.first() {
@@ -1426,13 +1514,9 @@ fn clip_command(
             timecode::chunk_range_to_time_range(&ref_track, &ref_entries, s, e)
                 .context("Failed to determine time range from chunk range")?
         } else if start_time.is_some() || end_time.is_some() {
-            let (s, e) = timecode::time_range_to_chunk_range(
-                &ref_track,
-                &ref_entries,
-                start_time,
-                end_time,
-            )
-            .context("Failed to determine chunk range for partial time range")?;
+            let (s, e) =
+                timecode::time_range_to_chunk_range(&ref_track, &ref_entries, start_time, end_time)
+                    .context("Failed to determine chunk range for partial time range")?;
             timecode::chunk_range_to_time_range(&ref_track, &ref_entries, s, e)
                 .context("Failed to resolve absolute time range")?
         } else {
@@ -1599,7 +1683,10 @@ fn clip_command(
     let mut writer = SmedWriter::new(out_file);
     writer.write_all(&manifest, &track_table, &chunk_table, &all_chunks)?;
 
-    println!("Successfully created clip with {} tracks: {:?}", final_track_count, output);
+    println!(
+        "Successfully created clip with {} tracks: {:?}",
+        final_track_count, output
+    );
     Ok(())
 }
 

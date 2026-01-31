@@ -9,6 +9,11 @@ pub struct ChunkWithMeta {
     pub pts: Option<i64>,
 }
 
+pub struct ChunkedTrack {
+    pub chunks: Vec<ChunkWithMeta>,
+    pub playback: TrackPlaybackInfo,
+}
+
 pub struct TrackPlaybackInfo {
     pub codec: String,
     pub container_type: Option<String>,
@@ -25,50 +30,71 @@ pub fn chunk_media(
     reader: &mut impl Read,
     max_chunk_size: u64,
 ) -> Result<(Vec<ChunkWithMeta>, TrackPlaybackInfo)> {
+    let tracks = chunk_media_tracks(reader, max_chunk_size)?;
+    let mut iter = tracks.into_iter();
+    iter.next()
+        .map(|track| (track.chunks, track.playback))
+        .ok_or_else(|| anyhow!("No tracks detected in input"))
+}
+
+pub fn chunk_media_tracks(
+    reader: &mut impl Read,
+    max_chunk_size: u64,
+) -> Result<Vec<ChunkedTrack>> {
     let mut data = Vec::new();
     reader.read_to_end(&mut data)?;
+
+    if let Some(image_type) = detect_image_type(&data) {
+        return Ok(vec![ChunkedTrack {
+            chunks: fallback_chunking(&data, max_chunk_size),
+            playback: raw_track_info(Some(image_type)),
+        }]);
+    }
+
     if let Some(container_type) = detect_container_type(&data) {
-        if let Some(demuxed) = demux_container_stream(&data, &container_type)? {
-            if let Some(result) =
-                chunk_media_from_bytes(&demuxed, max_chunk_size, Some(container_type.clone()))
-            {
-                return Ok(result);
+        let streams = demux_container_streams(&data, &container_type)?;
+        let mut tracks = Vec::new();
+        for stream in streams {
+            if let Some((chunks, playback)) = chunk_media_for_codec(
+                &stream.data,
+                max_chunk_size,
+                Some(container_type.clone()),
+                &stream.codec_name,
+            ) {
+                tracks.push(ChunkedTrack { chunks, playback });
             }
         }
-        return Ok((
-            fallback_chunking(&data, max_chunk_size),
-            TrackPlaybackInfo {
-                codec: "raw".to_string(),
-                container_type: Some(container_type),
-                codec_extradata: None,
-                width: None,
-                height: None,
-                sample_rate: None,
-                channels: None,
-                timebase_num: None,
-                timebase_den: None,
-            },
-        ));
+        if !tracks.is_empty() {
+            return Ok(tracks);
+        }
+        return Ok(vec![ChunkedTrack {
+            chunks: fallback_chunking(&data, max_chunk_size),
+            playback: raw_track_info(Some(container_type)),
+        }]);
     }
 
-    if let Some(result) = chunk_media_from_bytes(&data, max_chunk_size, None) {
-        return Ok(result);
+    if let Some((chunks, playback)) = chunk_media_from_bytes(&data, max_chunk_size, None) {
+        return Ok(vec![ChunkedTrack { chunks, playback }]);
     }
 
-    Ok((
-        fallback_chunking(&data, max_chunk_size),
-        TrackPlaybackInfo {
-            codec: "raw".to_string(),
-            container_type: None,
-            codec_extradata: None,
-            width: None,
-            height: None,
-            sample_rate: None,
-            channels: None,
-            timebase_num: None,
-            timebase_den: None,
-        },
-    ))
+    Ok(vec![ChunkedTrack {
+        chunks: fallback_chunking(&data, max_chunk_size),
+        playback: raw_track_info(None),
+    }])
+}
+
+fn raw_track_info(container_type: Option<String>) -> TrackPlaybackInfo {
+    TrackPlaybackInfo {
+        codec: "raw".to_string(),
+        container_type,
+        codec_extradata: None,
+        width: None,
+        height: None,
+        sample_rate: None,
+        channels: None,
+        timebase_num: None,
+        timebase_den: None,
+    }
 }
 
 fn chunk_media_from_bytes(
@@ -128,6 +154,105 @@ fn chunk_media_from_bytes(
     None
 }
 
+fn chunk_media_for_codec(
+    data: &[u8],
+    max_chunk_size: u64,
+    container_type: Option<String>,
+    codec_name: &str,
+) -> Option<(Vec<ChunkWithMeta>, TrackPlaybackInfo)> {
+    let normalized = codec_name.to_ascii_lowercase();
+    match normalized.as_str() {
+        "opus" | "flac" => Some((
+            fallback_chunking(data, max_chunk_size),
+            TrackPlaybackInfo {
+                codec: normalized,
+                container_type,
+                codec_extradata: None,
+                width: None,
+                height: None,
+                sample_rate: None,
+                channels: None,
+                timebase_num: None,
+                timebase_den: None,
+            },
+        )),
+        _ => {
+            if let Some(result) =
+                chunk_media_from_bytes(data, max_chunk_size, container_type.clone())
+            {
+                return Some(result);
+            }
+            if matches!(normalized.as_str(), "aac" | "h264" | "h265" | "hevc") {
+                return Some((
+                    fallback_chunking(data, max_chunk_size),
+                    TrackPlaybackInfo {
+                        codec: normalized,
+                        container_type,
+                        codec_extradata: None,
+                        width: None,
+                        height: None,
+                        sample_rate: None,
+                        channels: None,
+                        timebase_num: None,
+                        timebase_den: None,
+                    },
+                ));
+            }
+            None
+        }
+    }
+}
+
+fn detect_image_type(data: &[u8]) -> Option<String> {
+    if data.len() >= 8 && data.starts_with(&[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A]) {
+        return Some("png".to_string());
+    }
+    if data.len() >= 3 && data[0] == 0xFF && data[1] == 0xD8 && data[2] == 0xFF {
+        return Some("jpg".to_string());
+    }
+    if data.len() >= 6 && (data.starts_with(b"GIF87a") || data.starts_with(b"GIF89a")) {
+        return Some("gif".to_string());
+    }
+    if data.len() >= 12 && data.starts_with(b"RIFF") && data[8..12] == *b"WEBP" {
+        return Some("webp".to_string());
+    }
+    if is_heif_image(data) {
+        return Some("heic".to_string());
+    }
+    None
+}
+
+fn is_heif_image(data: &[u8]) -> bool {
+    if data.len() < 16 {
+        return false;
+    }
+    if &data[4..8] != b"ftyp" {
+        return false;
+    }
+    if is_heif_brand(&data[8..12]) {
+        return true;
+    }
+    let size = u32::from_be_bytes([data[0], data[1], data[2], data[3]]) as usize;
+    if size < 16 || size > data.len() {
+        return false;
+    }
+    let mut offset = 16;
+    while offset + 4 <= size {
+        if is_heif_brand(&data[offset..offset + 4]) {
+            return true;
+        }
+        offset += 4;
+    }
+    false
+}
+
+fn is_heif_brand(brand: &[u8]) -> bool {
+    matches!(
+        brand,
+        b"heic" | b"heix" | b"hevc" | b"hevx" | b"mif1" | b"msf1"
+    )
+}
+
 fn detect_container_type(data: &[u8]) -> Option<String> {
     if looks_like_isobmff(data) {
         return Some("mp4".to_string());
@@ -152,7 +277,12 @@ fn detect_container_type(data: &[u8]) -> Option<String> {
     None
 }
 
-fn demux_container_stream(data: &[u8], container_type: &str) -> Result<Option<Vec<u8>>> {
+struct DemuxedStream {
+    pub codec_name: String,
+    pub data: Vec<u8>,
+}
+
+fn demux_container_streams(data: &[u8], container_type: &str) -> Result<Vec<DemuxedStream>> {
     let temp_dir = std::env::temp_dir().join(format!("smed-demux-{}", Uuid::new_v4()));
     fs::create_dir_all(&temp_dir).context("Failed to create temp directory")?;
     let input_path = temp_dir.join(format!("input.{}", container_type));
@@ -186,62 +316,82 @@ fn demux_container_stream(data: &[u8], container_type: &str) -> Result<Option<Ve
 
     let parsed: FfprobeOutput =
         serde_json::from_slice(&probe.stdout).context("Failed to parse ffprobe JSON")?;
-    let streams = parsed.streams.unwrap_or_default();
-    let mut selected = streams
-        .iter()
-        .find(|stream| stream.codec_type.as_deref() == Some("video"))
-        .or_else(|| streams.iter().find(|stream| stream.codec_type.as_deref() == Some("audio")))
-        .or_else(|| streams.first());
+    let mut streams: Vec<(u32, String)> = parsed
+        .streams
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|stream| {
+            let index = stream.index?;
+            let codec_name = stream.codec_name?.to_ascii_lowercase();
+            let codec_type = stream.codec_type.unwrap_or_default();
+            if codec_type != "video" && codec_type != "audio" {
+                return None;
+            }
+            if demux_stream_params(&codec_name).is_none() {
+                return None;
+            }
+            Some((index, codec_name))
+        })
+        .collect();
+    streams.sort_by_key(|(index, _)| *index);
 
-    let Some(stream) = selected.take() else {
-        let _ = fs::remove_file(&input_path);
-        let _ = fs::remove_dir(&temp_dir);
-        return Ok(None);
-    };
-
-    let index = stream.index.context("Missing stream index")?;
-    let codec_name = stream
-        .codec_name
-        .clone()
-        .unwrap_or_else(|| "unknown".to_string())
-        .to_ascii_lowercase();
-    let (codec, format, bitstream_filter) = match codec_name.as_str() {
-        "h264" => ("h264", "h264", Some("h264_mp4toannexb")),
-        "hevc" | "h265" => ("h265", "hevc", Some("hevc_mp4toannexb")),
-        "aac" => ("aac", "adts", None),
-        _ => {
-            let _ = fs::remove_file(&input_path);
-            let _ = fs::remove_dir(&temp_dir);
-            return Ok(None);
+    let mut outputs = Vec::new();
+    let mut output_paths = Vec::new();
+    for (index, codec_name) in streams {
+        let Some((codec, format, bitstream_filter)) = demux_stream_params(&codec_name) else {
+            continue;
+        };
+        let output_path = temp_dir.join(format!("stream-{}-{}.bin", index, codec));
+        let mut command = Command::new("ffmpeg");
+        command.arg("-y");
+        command.arg("-i").arg(&input_path);
+        command.arg("-map").arg(format!("0:{}", index));
+        command.arg("-c").arg("copy");
+        if let Some(filter) = bitstream_filter {
+            command.arg("-bsf:v").arg(filter);
         }
-    };
+        command.arg("-f").arg(format).arg(&output_path);
 
-    let output_path = temp_dir.join(format!("stream-{}.bin", codec));
-    let mut command = Command::new("ffmpeg");
-    command.arg("-y");
-    command.arg("-i").arg(&input_path);
-    command.arg("-map").arg(format!("0:{}", index));
-    command.arg("-c").arg("copy");
-    if let Some(filter) = bitstream_filter {
-        command.arg("-bsf:v").arg(filter);
+        let status = command
+            .status()
+            .context("Failed to invoke ffmpeg for demux")?;
+        if !status.success() {
+            let _ = fs::remove_file(&input_path);
+            for path in output_paths {
+                let _ = fs::remove_file(path);
+            }
+            let _ = fs::remove_dir(&temp_dir);
+            return Err(anyhow!("ffmpeg demux failed with status {}", status));
+        }
+
+        let demuxed = fs::read(&output_path).context("Failed to read demuxed stream data")?;
+        outputs.push(DemuxedStream {
+            codec_name,
+            data: demuxed,
+        });
+        output_paths.push(output_path);
     }
-    command.arg("-f").arg(format).arg(&output_path);
 
-    let status = command
-        .status()
-        .context("Failed to invoke ffmpeg for demux")?;
-    if !status.success() {
-        let _ = fs::remove_file(&input_path);
-        let _ = fs::remove_file(&output_path);
-        let _ = fs::remove_dir(&temp_dir);
-        return Err(anyhow!("ffmpeg demux failed with status {}", status));
-    }
-
-    let demuxed = fs::read(&output_path).context("Failed to read demuxed stream data")?;
     let _ = fs::remove_file(&input_path);
-    let _ = fs::remove_file(&output_path);
+    for path in output_paths {
+        let _ = fs::remove_file(path);
+    }
     let _ = fs::remove_dir(&temp_dir);
-    Ok(Some(demuxed))
+
+    Ok(outputs)
+}
+
+fn demux_stream_params(
+    codec_name: &str,
+) -> Option<(&'static str, &'static str, Option<&'static str>)> {
+    match codec_name {
+        "h264" => Some(("h264", "h264", Some("h264_mp4toannexb"))),
+        "hevc" | "h265" => Some(("h265", "hevc", Some("hevc_mp4toannexb"))),
+        "aac" => Some(("aac", "adts", None)),
+        "opus" => Some(("opus", "opus", None)),
+        "flac" => Some(("flac", "flac", None)),
+        _ => None,
+    }
 }
 
 pub struct AdtsParseInfo {
@@ -958,6 +1108,8 @@ pub fn codec_to_ffmpeg_format(codec: &str) -> Option<&'static str> {
         "h264" => Some("h264"),
         "h265" | "hevc" => Some("hevc"),
         "aac" => Some("adts"),
+        "opus" => Some("opus"),
+        "flac" => Some("flac"),
         "raw" => Some("data"),
         _ => None,
     }
