@@ -29,11 +29,11 @@ enum Commands {
     /// Generate a new Ed25519 keypair
     GenKey {
         /// Path to save the private key (binary)
-        #[arg(short, long, default_value = "key.priv")]
-        output: PathBuf,
+        #[arg(short = 'o', long = "private", default_value = "key.priv")]
+        private: PathBuf,
         /// Path to save the public key (hex-encoded)
-        #[arg(short, long)]
-        public_output: Option<PathBuf>,
+        #[arg(short = 'p', long = "public")]
+        public: Option<PathBuf>,
     },
     /// Sign one or more media files and create a .smed container
     Sign {
@@ -119,17 +119,17 @@ fn main() -> Result<()> {
 
     match cli.command {
         Commands::GenKey {
-            output,
-            public_output,
+            private,
+            public,
         } => {
             let signing_key = crypto::generate_keypair();
             let pub_key_hex = hex::encode(signing_key.verifying_key().to_bytes());
 
-            fs::write(&output, signing_key.to_bytes())
-                .with_context(|| format!("Failed to write private key to {:?}", output))?;
-            println!("Private key saved to {:?}", output);
+            fs::write(&private, signing_key.to_bytes())
+                .with_context(|| format!("Failed to write private key to {:?}", private))?;
+            println!("Private key saved to {:?}", private);
 
-            if let Some(pub_path) = public_output {
+            if let Some(pub_path) = public {
                 fs::write(&pub_path, &pub_key_hex)
                     .with_context(|| format!("Failed to write public key to {:?}", pub_path))?;
                 println!("Public key saved to {:?}", pub_path);

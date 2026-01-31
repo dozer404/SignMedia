@@ -183,7 +183,7 @@ cargo build --release
 Generate a keypair (saves private key and optionally public key, prints public key):
 
 ```bash
-cargo run -- gen-key --output key.priv --public-output key.pub
+cargo run -- gen-key --private key.priv --public key.pub
 ```
 
 Sign a file and create a `.smed` container:
@@ -200,7 +200,7 @@ Sign a file and create a `.smed` container:
 
 ### Create a private key
 
-    gen-key --output key.priv
+    gen-key --private key.priv
 
 ### Create a signed original
 
