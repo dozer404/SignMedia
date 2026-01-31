@@ -1107,7 +1107,8 @@ pub fn codec_to_ffmpeg_format(codec: &str) -> Option<&'static str> {
     match codec.to_lowercase().as_str() {
         "h264" => Some("h264"),
         "h265" | "hevc" => Some("hevc"),
-        "aac" => Some("adts"),
+        // Use the raw AAC demuxer name for ffmpeg input; some builds don't expose "adts".
+        "aac" => Some("aac"),
         "opus" => Some("opus"),
         "flac" => Some("flac"),
         "raw" => Some("data"),
