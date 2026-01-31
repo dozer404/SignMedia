@@ -238,6 +238,9 @@ SMED_TTP_PRIVATE_KEY=00000000000000000000000000000000000000000000000000000000000
 
 # Hex-encoded 32-byte Ed25519 public key
 SMED_TTP_PUBLIC_KEY=92f2beb2bf58b85302ca00dab45efcbb74a3bfd8ed9a13966f8538f40c0b3e55
+
+# Display-friendly name for the Trusted Third Party
+SMED_TTP_NAME="SignMedia TTP"
 ```
 (The value must be a 64-character hex-encoded string representing the 32-byte Ed25519 private key).
 
