@@ -1,6 +1,6 @@
-use wasm_bindgen::prelude::*;
-use crate::models::SignedManifest;
 use crate::container::StreamingVerifier;
+use crate::models::SignedManifest;
+use wasm_bindgen::prelude::*;
 
 #[wasm_bindgen]
 pub struct WasmVerifier {
@@ -11,10 +11,10 @@ pub struct WasmVerifier {
 impl WasmVerifier {
     #[wasm_bindgen(constructor)]
     pub fn new(manifest_json: &str) -> Result<WasmVerifier, JsValue> {
-        let manifest: SignedManifest = serde_json::from_str(manifest_json)
-            .map_err(|e| JsValue::from_str(&e.to_string()))?;
-        let verifier = StreamingVerifier::new(manifest)
-            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        let manifest: SignedManifest =
+            serde_json::from_str(manifest_json).map_err(|e| JsValue::from_str(&e.to_string()))?;
+        let verifier =
+            StreamingVerifier::new(manifest).map_err(|e| JsValue::from_str(&e.to_string()))?;
         Ok(WasmVerifier { verifier })
     }
 
@@ -29,7 +29,7 @@ pub fn verify_original_signature(manifest_json: &str) -> bool {
         Ok(m) => m,
         Err(_) => return false,
     };
-    
+
     // Simplistic check for v1 WASM export
     !manifest.signatures.is_empty()
 }

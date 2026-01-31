@@ -1,10 +1,10 @@
-use blake3::Hasher;
 use crate::models::{MerkleProof, ProofStep};
-use img_hash::{HasherConfig, HashAlg};
-use img_hash::image;
-use ed25519_dalek::{SigningKey, VerifyingKey, Signature, Signer, Verifier};
-use std::convert::TryInto;
 use anyhow::{anyhow, Context, Result};
+use blake3::Hasher;
+use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
+use img_hash::image;
+use img_hash::{HashAlg, HasherConfig};
+use std::convert::TryInto;
 
 pub type Hash = [u8; 32];
 
@@ -19,7 +19,9 @@ pub struct MerkleTree {
 impl MerkleTree {
     pub fn new(leaves: Vec<Hash>) -> Self {
         if leaves.is_empty() {
-            return Self { nodes: vec![vec![[0u8; 32]]] };
+            return Self {
+                nodes: vec![vec![[0u8; 32]]],
+            };
         }
         let mut nodes = vec![leaves];
         while nodes.last().unwrap().len() > 1 {
@@ -34,8 +36,8 @@ impl MerkleTree {
                 } else {
                     // Odd number of nodes, promote the last one
                     // In a standard Merkle tree, we might duplicate or just promote.
-                    // Promoting can be insecure in some contexts (second preimage), 
-                    // but for this v1 it's simple. 
+                    // Promoting can be insecure in some contexts (second preimage),
+                    // but for this v1 it's simple.
                     // Better: hash(chunk[0] || chunk[0]) or just use a well-known construction.
                     // For simplicity, let's just promote but be aware.
                     next_level.push(chunk[0]);
@@ -88,7 +90,7 @@ pub fn verify_proof(root: Hash, proof: &MerkleProof) -> bool {
         Ok(h) => h.try_into().unwrap_or([0u8; 32]),
         Err(_) => return false,
     };
-    
+
     for step in &proof.path {
         let sibling_hash: Hash = match hex::decode(&step.hash) {
             Ok(h) => h.try_into().unwrap_or([0u8; 32]),
@@ -104,7 +106,7 @@ pub fn verify_proof(root: Hash, proof: &MerkleProof) -> bool {
         }
         current_hash = hasher.finalize().into();
     }
-    
+
     current_hash == root
 }
 
@@ -156,7 +158,9 @@ pub fn get_ttp_signing_key() -> Result<SigningKey> {
     let key_hex = std::env::var("SMED_TTP_PRIVATE_KEY")
         .context("Missing TTP private key. Set SMED_TTP_PRIVATE_KEY environment variable.")?;
     let key_bytes = hex::decode(key_hex).context("Invalid TTP key format")?;
-    let key_array: [u8; 32] = key_bytes.try_into().map_err(|_| anyhow!("Invalid TTP key size"))?;
+    let key_array: [u8; 32] = key_bytes
+        .try_into()
+        .map_err(|_| anyhow!("Invalid TTP key size"))?;
     Ok(SigningKey::from_bytes(&key_array))
 }
 
@@ -183,8 +187,10 @@ pub fn compute_derivative_fingerprint(clipper_id: &str) -> String {
 pub fn compute_perceptual_hash(data: &[u8]) -> Option<String> {
     // Treat data as a square grayscale image if possible
     let size = (data.len() as f64).sqrt() as u32;
-    if size < 8 { return None; }
-    
+    if size < 8 {
+        return None;
+    }
+
     let mut imgbuf = image::ImageBuffer::new(size, size);
     for (i, pixel) in imgbuf.pixels_mut().enumerate() {
         if i < data.len() {
@@ -192,12 +198,12 @@ pub fn compute_perceptual_hash(data: &[u8]) -> Option<String> {
         }
     }
     let dynamic_img = image::DynamicImage::ImageLuma8(imgbuf);
-    
+
     let hasher = HasherConfig::new()
         .hash_alg(HashAlg::Gradient)
         .hash_size(16, 16)
         .to_hasher();
-    
+
     let hash = hasher.hash_image(&dynamic_img);
     Some(hash.to_base64())
 }

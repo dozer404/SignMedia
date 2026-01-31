@@ -1,8 +1,10 @@
-use signmedia::crypto;
-use signmedia::models::{AuthorMetadata, ManifestContent, OriginalWorkDescriptor, SignedManifest, SignatureEntry};
 use chrono::Utc;
+use ed25519_dalek::{Signature, VerifyingKey};
+use signmedia::crypto;
+use signmedia::models::{
+    AuthorMetadata, ManifestContent, OriginalWorkDescriptor, SignatureEntry, SignedManifest,
+};
 use uuid::Uuid;
-use ed25519_dalek::{VerifyingKey, Signature};
 
 #[test]
 fn test_multi_signature_and_fingerprint() {
@@ -55,18 +57,28 @@ fn test_multi_signature_and_fingerprint() {
         let verifying_key = VerifyingKey::from_bytes(&pubkey_bytes.try_into().unwrap()).unwrap();
         let sig_bytes = hex::decode(&sig_entry.signature).unwrap();
         let signature = Signature::from_bytes(&sig_bytes.try_into().unwrap());
-        assert!(crypto::verify_signature(&content_hash, &signature, &verifying_key));
+        assert!(crypto::verify_signature(
+            &content_hash,
+            &signature,
+            &verifying_key
+        ));
     }
 
     // 2. Verify fingerprint
     let actual_fingerprint = crypto::compute_authorship_fingerprint(&owd.authors);
-    assert_eq!(owd.authorship_fingerprint.as_ref().unwrap(), &actual_fingerprint);
+    assert_eq!(
+        owd.authorship_fingerprint.as_ref().unwrap(),
+        &actual_fingerprint
+    );
 
     // 3. Tamper with author name
     let mut tampered_owd = owd.clone();
     tampered_owd.authors[0].name = "Tampered Author".to_string();
     let tampered_actual_fingerprint = crypto::compute_authorship_fingerprint(&tampered_owd.authors);
-    assert_ne!(owd.authorship_fingerprint.as_ref().unwrap(), &tampered_actual_fingerprint);
+    assert_ne!(
+        owd.authorship_fingerprint.as_ref().unwrap(),
+        &tampered_actual_fingerprint
+    );
 }
 
 #[test]
@@ -76,5 +88,8 @@ fn test_derivative_fingerprint() {
     let fingerprint = crypto::compute_derivative_fingerprint(&clipper_id);
 
     assert_ne!(fingerprint, "");
-    assert_eq!(fingerprint, crypto::compute_derivative_fingerprint(&clipper_id));
+    assert_eq!(
+        fingerprint,
+        crypto::compute_derivative_fingerprint(&clipper_id)
+    );
 }
