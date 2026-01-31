@@ -155,7 +155,7 @@ Defines: - Header structures
 SignMedia CLI tool
 
 Usage: signmedia <COMMAND>
-
+```bash
 Commands:
   gen-key          Generate a new Ed25519 keypair
   sign             Sign one or more media files and create a .smed container
@@ -167,6 +167,7 @@ Commands:
 
 Options:
   -h, --help  Print help
+```
 
 SignMedia includes these CLI utilities:
 
