@@ -223,15 +223,17 @@ extracted to the same container extension they were originally signed with.
 ## Verify extracted file's metadata
 
     verify-metadata --input extracted.mp4
-
+```
 ### Trusted Third Party (TTP) Setup
+
+
+
+## Format for `.env` or environment:
 
 SignMedia now requires a multi-signature for all operations (Original signing and Clipping). This is handled by a Trusted Third Party (TTP) key.
 
 For this POC, the TTP public key is hardcoded. To perform signing or clipping, you must provide the TTP private key via the `SMED_TTP_PRIVATE_KEY` environment variable.
-```
 
-## Format for `.env` or environment:
 ```bash
 # Hex-encoded 32-byte Ed25519 private key
 SMED_TTP_PRIVATE_KEY=0000000000000000000000000000000000000000000000000000000000000000
