@@ -103,7 +103,9 @@ fn chunk_media_from_bytes(
     container_type: Option<String>,
 ) -> Option<(Vec<ChunkWithMeta>, TrackPlaybackInfo)> {
     if let Some(info) = parse_adts_frames(data) {
-        let chunks = group_adts_frames(data, &info.frames, max_chunk_size);
+        let frame_duration_us = (1_000_000i64 * 1024) / info.sample_rate as i64;
+        let chunks =
+            group_adts_frames(data, &info.frames, max_chunk_size, frame_duration_us);
         let codec_extradata = build_aac_extradata(
             info.audio_object_type,
             info.sample_rate_index,
@@ -162,20 +164,45 @@ fn chunk_media_for_codec(
 ) -> Option<(Vec<ChunkWithMeta>, TrackPlaybackInfo)> {
     let normalized = codec_name.to_ascii_lowercase();
     match normalized.as_str() {
-        "opus" | "flac" => Some((
-            fallback_chunking(data, max_chunk_size),
-            TrackPlaybackInfo {
-                codec: normalized,
-                container_type,
-                codec_extradata: None,
-                width: None,
-                height: None,
-                sample_rate: None,
-                channels: None,
-                timebase_num: None,
-                timebase_den: None,
-            },
-        )),
+        "opus" => {
+            if let Some(result) = chunk_ogg_opus(data, max_chunk_size, container_type.clone()) {
+                return Some(result);
+            }
+            Some((
+                fallback_chunking(data, max_chunk_size),
+                TrackPlaybackInfo {
+                    codec: normalized,
+                    container_type,
+                    codec_extradata: None,
+                    width: None,
+                    height: None,
+                    sample_rate: None,
+                    channels: None,
+                    timebase_num: None,
+                    timebase_den: None,
+                },
+            ))
+        }
+        "flac" => {
+            if let Some(result) = chunk_flac_from_bytes(data, max_chunk_size, container_type.clone())
+            {
+                return Some(result);
+            }
+            Some((
+                fallback_chunking(data, max_chunk_size),
+                TrackPlaybackInfo {
+                    codec: normalized,
+                    container_type,
+                    codec_extradata: None,
+                    width: None,
+                    height: None,
+                    sample_rate: None,
+                    channels: None,
+                    timebase_num: None,
+                    timebase_den: None,
+                },
+            ))
+        }
         _ => {
             if let Some(result) =
                 chunk_media_from_bytes(data, max_chunk_size, container_type.clone())
@@ -465,17 +492,30 @@ pub fn group_adts_frames(
     data: &[u8],
     frames: &[(usize, usize, i64)],
     max_chunk_size: u64,
+    frame_duration_us: i64,
 ) -> Vec<ChunkWithMeta> {
+    const MAX_AUDIO_CHUNK_DURATION_US: i64 = 1_000_000;
     let mut chunks = Vec::new();
     let mut current = Vec::new();
     let mut current_pts = None;
     for (start, length, pts) in frames {
-        if !current.is_empty() && current.len() as u64 + *length as u64 > max_chunk_size {
-            chunks.push(ChunkWithMeta {
-                data: std::mem::take(&mut current),
-                pts: current_pts,
-            });
-            current_pts = None;
+        if !current.is_empty() {
+            let mut should_flush = current.len() as u64 + *length as u64 > max_chunk_size;
+            if let Some(start_pts) = current_pts {
+                if frame_duration_us > 0 {
+                    let end_pts = pts.saturating_add(frame_duration_us);
+                    if end_pts.saturating_sub(start_pts) > MAX_AUDIO_CHUNK_DURATION_US {
+                        should_flush = true;
+                    }
+                }
+            }
+            if should_flush {
+                chunks.push(ChunkWithMeta {
+                    data: std::mem::take(&mut current),
+                    pts: current_pts,
+                });
+                current_pts = None;
+            }
         }
         if current.is_empty() {
             current_pts = Some(*pts);
@@ -489,6 +529,471 @@ pub fn group_adts_frames(
         });
     }
     chunks
+}
+
+struct AudioFrameMeta {
+    start: usize,
+    len: usize,
+    pts_us: i64,
+    duration_us: i64,
+}
+
+fn group_frames_with_durations(
+    data: &[u8],
+    frames: &[AudioFrameMeta],
+    max_chunk_size: u64,
+) -> Vec<ChunkWithMeta> {
+    const MAX_AUDIO_CHUNK_DURATION_US: i64 = 1_000_000;
+    let mut chunks = Vec::new();
+    let mut current = Vec::new();
+    let mut current_pts: Option<i64> = None;
+    let mut current_end: Option<i64> = None;
+
+    for frame in frames {
+        if !current.is_empty() {
+            let mut should_flush = current.len() as u64 + frame.len as u64 > max_chunk_size;
+            if let Some(start_pts) = current_pts {
+                let frame_end = frame
+                    .pts_us
+                    .saturating_add(frame.duration_us.max(0));
+                let next_end = current_end.map_or(frame_end, |end| end.max(frame_end));
+                if next_end.saturating_sub(start_pts) > MAX_AUDIO_CHUNK_DURATION_US {
+                    should_flush = true;
+                }
+            }
+            if should_flush {
+                chunks.push(ChunkWithMeta {
+                    data: std::mem::take(&mut current),
+                    pts: current_pts,
+                });
+                current_pts = None;
+                current_end = None;
+            }
+        }
+
+        if current.is_empty() {
+            current_pts = Some(frame.pts_us);
+            current_end = Some(frame.pts_us);
+        }
+        current.extend_from_slice(&data[frame.start..frame.start + frame.len]);
+        let frame_end = frame.pts_us.saturating_add(frame.duration_us.max(0));
+        current_end = Some(current_end.map_or(frame_end, |end| end.max(frame_end)));
+    }
+
+    if !current.is_empty() {
+        chunks.push(ChunkWithMeta {
+            data: current,
+            pts: current_pts,
+        });
+    }
+    chunks
+}
+
+struct OggPage {
+    start: usize,
+    len: usize,
+    granule_pos: Option<u64>,
+}
+
+fn parse_ogg_pages(data: &[u8]) -> Option<Vec<OggPage>> {
+    if data.len() < 27 || &data[..4] != b"OggS" {
+        return None;
+    }
+    let mut pages = Vec::new();
+    let mut offset = 0usize;
+    while offset + 27 <= data.len() {
+        if &data[offset..offset + 4] != b"OggS" {
+            return None;
+        }
+        let seg_count = *data.get(offset + 26)? as usize;
+        if offset + 27 + seg_count > data.len() {
+            return None;
+        }
+        let mut body_len = 0usize;
+        for i in 0..seg_count {
+            body_len += data[offset + 27 + i] as usize;
+        }
+        let page_len = 27 + seg_count + body_len;
+        if offset + page_len > data.len() {
+            return None;
+        }
+        let granule_raw = u64::from_le_bytes(
+            data[offset + 6..offset + 14].try_into().ok()?,
+        );
+        let granule_pos = if granule_raw == u64::MAX {
+            None
+        } else {
+            Some(granule_raw)
+        };
+        pages.push(OggPage {
+            start: offset,
+            len: page_len,
+            granule_pos,
+        });
+        offset += page_len;
+    }
+    if offset != data.len() {
+        return None;
+    }
+    Some(pages)
+}
+
+fn parse_opus_head(data: &[u8]) -> Option<(u32, u16)> {
+    let marker = b"OpusHead";
+    let pos = data
+        .windows(marker.len())
+        .position(|window| window == marker)?;
+    if pos + 19 > data.len() {
+        return None;
+    }
+    let channels = data[pos + 9] as u16;
+    let sample_rate = u32::from_le_bytes(
+        data[pos + 12..pos + 16].try_into().ok()?,
+    );
+    Some((sample_rate, channels))
+}
+
+fn samples_to_us(samples: u64, sample_rate: u32) -> i64 {
+    if sample_rate == 0 {
+        return 0;
+    }
+    let micros = (samples as u128)
+        .saturating_mul(1_000_000u128)
+        / sample_rate as u128;
+    micros.min(i64::MAX as u128) as i64
+}
+
+fn chunk_ogg_opus(
+    data: &[u8],
+    max_chunk_size: u64,
+    container_type: Option<String>,
+) -> Option<(Vec<ChunkWithMeta>, TrackPlaybackInfo)> {
+    let pages = parse_ogg_pages(data)?;
+    let (mut sample_rate, channels) = parse_opus_head(data).unwrap_or((48_000, 0));
+    if sample_rate == 0 {
+        sample_rate = 48_000;
+    }
+    let mut frames = Vec::with_capacity(pages.len());
+    let mut prev_granule = None;
+    let mut pts_samples = 0u64;
+    for page in pages {
+        let duration_samples = match (page.granule_pos, prev_granule) {
+            (Some(current), Some(prev)) if current >= prev => current - prev,
+            _ => 0,
+        };
+        if let Some(current) = page.granule_pos {
+            prev_granule = Some(current);
+        }
+        let pts_us = samples_to_us(pts_samples, 48_000);
+        let duration_us = samples_to_us(duration_samples, 48_000);
+        frames.push(AudioFrameMeta {
+            start: page.start,
+            len: page.len,
+            pts_us,
+            duration_us,
+        });
+        pts_samples = pts_samples.saturating_add(duration_samples);
+    }
+    let chunks = group_frames_with_durations(data, &frames, max_chunk_size);
+    Some((
+        chunks,
+        TrackPlaybackInfo {
+            codec: "opus".to_string(),
+            container_type,
+            codec_extradata: None,
+            width: None,
+            height: None,
+            sample_rate: Some(sample_rate),
+            channels: if channels == 0 { None } else { Some(channels) },
+            timebase_num: Some(1),
+            timebase_den: Some(1_000_000),
+        },
+    ))
+}
+
+struct FlacStreamInfo {
+    metadata_end: usize,
+    sample_rate: u32,
+    channels: Option<u16>,
+}
+
+fn parse_flac_streaminfo(data: &[u8]) -> Option<FlacStreamInfo> {
+    if data.len() < 4 || &data[..4] != b"fLaC" {
+        return None;
+    }
+    let mut offset = 4usize;
+    let mut sample_rate = None;
+    let mut channels = None;
+    loop {
+        if offset + 4 > data.len() {
+            return None;
+        }
+        let header = data[offset];
+        let is_last = (header & 0x80) != 0;
+        let block_type = header & 0x7F;
+        let length = ((data[offset + 1] as usize) << 16)
+            | ((data[offset + 2] as usize) << 8)
+            | data[offset + 3] as usize;
+        let block_start = offset + 4;
+        let block_end = block_start + length;
+        if block_end > data.len() {
+            return None;
+        }
+        if block_type == 0 && length >= 34 {
+            let info = &data[block_start..block_end];
+            let idx = 10;
+            if idx + 8 <= info.len() {
+                let raw = u64::from_be_bytes(info[idx..idx + 8].try_into().ok()?);
+                let sr = ((raw >> 44) & 0xFFFFF) as u32;
+                let ch = ((raw >> 41) & 0x7) as u16;
+                sample_rate = Some(sr);
+                channels = Some(ch + 1);
+            }
+        }
+        offset = block_end;
+        if is_last {
+            break;
+        }
+    }
+    Some(FlacStreamInfo {
+        metadata_end: offset,
+        sample_rate: sample_rate?,
+        channels,
+    })
+}
+
+struct FlacFrameHeader {
+    block_size: u32,
+    sample_rate: Option<u32>,
+}
+
+fn parse_flac_utf8_number_len(data: &[u8], offset: usize) -> Option<usize> {
+    let first = *data.get(offset)?;
+    if (first & 0x80) == 0 {
+        return Some(1);
+    }
+    let leading = first.leading_ones() as usize;
+    if leading < 2 || leading > 7 {
+        return None;
+    }
+    if offset + leading > data.len() {
+        return None;
+    }
+    for i in 1..leading {
+        if (data[offset + i] & 0xC0) != 0x80 {
+            return None;
+        }
+    }
+    Some(leading)
+}
+
+fn flac_crc8(data: &[u8]) -> u8 {
+    let mut crc = 0u8;
+    for &byte in data {
+        crc ^= byte;
+        for _ in 0..8 {
+            if (crc & 0x80) != 0 {
+                crc = (crc << 1) ^ 0x07;
+            } else {
+                crc <<= 1;
+            }
+        }
+    }
+    crc
+}
+
+fn flac_block_size_from_bits(bits: u8, data: &[u8], offset: &mut usize) -> Option<u32> {
+    match bits {
+        0b0000 => None,
+        0b0001 => Some(192),
+        0b0010 | 0b0011 | 0b0100 | 0b0101 => Some(144u32 << bits),
+        0b0110 => {
+            let value = *data.get(*offset)? as u32;
+            *offset += 1;
+            Some(value + 1)
+        }
+        0b0111 => {
+            let hi = *data.get(*offset)? as u32;
+            let lo = *data.get(*offset + 1)? as u32;
+            *offset += 2;
+            Some(((hi << 8) | lo) + 1)
+        }
+        0b1000 | 0b1001 | 0b1010 | 0b1011 | 0b1100 | 0b1101 | 0b1110 | 0b1111 => {
+            Some(1u32 << bits)
+        }
+        _ => None,
+    }
+}
+
+fn flac_sample_rate_from_bits(
+    bits: u8,
+    data: &[u8],
+    offset: &mut usize,
+    fallback: u32,
+) -> Option<u32> {
+    match bits {
+        0b0000 => Some(fallback),
+        0b0001 => Some(88_200),
+        0b0010 => Some(176_400),
+        0b0011 => Some(192_000),
+        0b0100 => Some(8_000),
+        0b0101 => Some(16_000),
+        0b0110 => Some(22_050),
+        0b0111 => Some(24_000),
+        0b1000 => Some(32_000),
+        0b1001 => Some(44_100),
+        0b1010 => Some(48_000),
+        0b1011 => Some(96_000),
+        0b1100 => {
+            let value = *data.get(*offset)? as u32;
+            *offset += 1;
+            Some(value * 1_000)
+        }
+        0b1101 => {
+            let hi = *data.get(*offset)? as u32;
+            let lo = *data.get(*offset + 1)? as u32;
+            *offset += 2;
+            Some((hi << 8) | lo)
+        }
+        0b1110 => {
+            let hi = *data.get(*offset)? as u32;
+            let lo = *data.get(*offset + 1)? as u32;
+            *offset += 2;
+            Some(((hi << 8) | lo) * 10)
+        }
+        _ => None,
+    }
+}
+
+fn parse_flac_frame_header(
+    data: &[u8],
+    offset: usize,
+    streaminfo_rate: u32,
+) -> Option<FlacFrameHeader> {
+    if offset + 4 > data.len() {
+        return None;
+    }
+    if data[offset] != 0xFF || (data[offset + 1] & 0xFE) != 0xF8 {
+        return None;
+    }
+    let block_bits = data[offset + 2] >> 4;
+    let sample_bits = data[offset + 2] & 0x0F;
+    if (data[offset + 3] & 0x01) != 0 {
+        return None;
+    }
+
+    let mut cursor = offset + 4;
+    let utf8_len = parse_flac_utf8_number_len(data, cursor)?;
+    cursor += utf8_len;
+
+    let block_size = flac_block_size_from_bits(block_bits, data, &mut cursor)?;
+    let sample_rate =
+        flac_sample_rate_from_bits(sample_bits, data, &mut cursor, streaminfo_rate);
+
+    if cursor >= data.len() {
+        return None;
+    }
+    let crc_expected = data[cursor];
+    let crc_actual = flac_crc8(&data[offset..cursor]);
+    if crc_expected != crc_actual {
+        return None;
+    }
+    Some(FlacFrameHeader {
+        block_size,
+        sample_rate,
+    })
+}
+
+fn chunk_flac_from_bytes(
+    data: &[u8],
+    max_chunk_size: u64,
+    container_type: Option<String>,
+) -> Option<(Vec<ChunkWithMeta>, TrackPlaybackInfo)> {
+    let info = parse_flac_streaminfo(data)?;
+    let mut frames = Vec::new();
+    let mut cursor = info.metadata_end;
+    let mut last_frame_start = None;
+    let mut last_header: Option<FlacFrameHeader> = None;
+    let mut pts_samples = 0u64;
+
+    while cursor + 4 <= data.len() {
+        let mut found = None;
+        let mut search = cursor;
+        while search + 4 <= data.len() {
+            if let Some(header) = parse_flac_frame_header(data, search, info.sample_rate) {
+                found = Some((search, header));
+                break;
+            }
+            search += 1;
+        }
+        let Some((frame_start, header)) = found else { break };
+
+        if let Some(prev_start) = last_frame_start {
+            let frame_len = frame_start.saturating_sub(prev_start);
+            let sample_rate = last_header
+                .as_ref()
+                .and_then(|h| h.sample_rate)
+                .unwrap_or(info.sample_rate);
+            let Some(last) = last_header.as_ref() else {
+                break;
+            };
+            let duration_us = samples_to_us(last.block_size as u64, sample_rate);
+            frames.push(AudioFrameMeta {
+                start: prev_start,
+                len: frame_len,
+                pts_us: samples_to_us(pts_samples, sample_rate),
+                duration_us,
+            });
+            pts_samples = pts_samples.saturating_add(last.block_size as u64);
+        } else if info.metadata_end > 0 {
+            frames.push(AudioFrameMeta {
+                start: 0,
+                len: info.metadata_end,
+                pts_us: 0,
+                duration_us: 0,
+            });
+        }
+
+        last_frame_start = Some(frame_start);
+        last_header = Some(header);
+        cursor = frame_start.saturating_add(2);
+    }
+
+    if let Some(prev_start) = last_frame_start {
+        let frame_len = data.len().saturating_sub(prev_start);
+        let sample_rate = last_header
+            .as_ref()
+            .and_then(|h| h.sample_rate)
+            .unwrap_or(info.sample_rate);
+        let block_size = last_header.as_ref()?.block_size as u64;
+        let duration_us = samples_to_us(block_size, sample_rate);
+        frames.push(AudioFrameMeta {
+            start: prev_start,
+            len: frame_len,
+            pts_us: samples_to_us(pts_samples, sample_rate),
+            duration_us,
+        });
+    }
+
+    if frames.is_empty() {
+        return None;
+    }
+
+    let chunks = group_frames_with_durations(data, &frames, max_chunk_size);
+    Some((
+        chunks,
+        TrackPlaybackInfo {
+            codec: "flac".to_string(),
+            container_type,
+            codec_extradata: None,
+            width: None,
+            height: None,
+            sample_rate: Some(info.sample_rate),
+            channels: info.channels,
+            timebase_num: Some(1),
+            timebase_den: Some(1_000_000),
+        },
+    ))
 }
 
 pub struct AnnexbNal {
