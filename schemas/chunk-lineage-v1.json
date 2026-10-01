@@ -1,0 +1,25 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "SignMediaChunkLineageV1",
+  "type": "object",
+  "properties": {
+    "parent_work_id": { "type": "string" },
+    "track_id": { "type": "integer" },
+    "start_chunk_index": { "type": "integer" },
+    "end_chunk_index": { "type": "integer" },
+    "merkle_root": { "type": "string" },
+    "proofs": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "chunk_index": { "type": "integer" },
+          "hash": { "type": "string" },
+          "chunk_size": { "type": "integer" }
+        },
+        "required": ["chunk_index", "hash"]
+      }
+    }
+  },
+  "required": ["parent_work_id", "track_id", "start_chunk_index", "end_chunk_index", "merkle_root", "proofs"]
+}
