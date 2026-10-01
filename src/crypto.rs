@@ -110,6 +110,100 @@ pub fn verify_proof(root: Hash, proof: &MerkleProof) -> bool {
     current_hash == root
 }
 
+pub struct MerkleTreeV2 {
+    pub nodes: Vec<Vec<Hash>>,
+}
+
+impl MerkleTreeV2 {
+    pub fn new(track_id: u32, chunks: &[&[u8]]) -> Self {
+        if chunks.is_empty() {
+            let mut hasher = Hasher::new();
+            hasher.update(&[0x02]);
+            hasher.update(b"EMPTY_TREE");
+            let empty_root: Hash = hasher.finalize().into();
+            return Self {
+                nodes: vec![vec![empty_root]],
+            };
+        }
+
+        let mut leaves: Vec<Hash> = Vec::with_capacity(chunks.len());
+        for (idx, chunk) in chunks.iter().enumerate() {
+            let mut hasher = Hasher::new();
+            hasher.update(&[0x00]);
+            hasher.update(&track_id.to_le_bytes());
+            hasher.update(&(idx as u64).to_le_bytes());
+            hasher.update(chunk);
+            let h: Hash = hasher.finalize().into();
+            leaves.push(h);
+        }
+
+        let mut nodes: Vec<Vec<Hash>> = vec![leaves];
+        while nodes.last().unwrap().len() > 1 {
+            let current_level = nodes.last().unwrap();
+            let mut next_level: Vec<Hash> = Vec::new();
+            for chunk in current_level.chunks(2) {
+                if chunk.len() == 2 {
+                    let mut hasher = Hasher::new();
+                    hasher.update(&[0x01]);
+                    hasher.update(&chunk[0]);
+                    hasher.update(&chunk[1]);
+                    let h: Hash = hasher.finalize().into();
+                    next_level.push(h);
+                } else {
+                    let mut hasher = Hasher::new();
+                    hasher.update(&[0x03]);
+                    hasher.update(&chunk[0]);
+                    let h: Hash = hasher.finalize().into();
+                    next_level.push(h);
+                }
+            }
+            nodes.push(next_level);
+        }
+
+        Self { nodes }
+    }
+
+    pub fn root(&self) -> Hash {
+        *self.nodes.last().unwrap().first().unwrap()
+    }
+}
+
+pub fn verify_proof_v2(root: Hash, proof: &MerkleProof) -> bool {
+    if proof.path.len() > 64 {
+        return false;
+    }
+
+    let mut current_hash: Hash = match hex::decode(&proof.hash) {
+        Ok(h) if h.len() == 32 => match h.try_into() {
+            Ok(arr) => arr,
+            Err(_) => return false,
+        },
+        _ => return false,
+    };
+
+    for step in &proof.path {
+        let sibling_hash: Hash = match hex::decode(&step.hash) {
+            Ok(h) if h.len() == 32 => match h.try_into() {
+                Ok(arr) => arr,
+                Err(_) => return false,
+            },
+            _ => return false,
+        };
+        let mut hasher = Hasher::new();
+        hasher.update(&[0x01]);
+        if step.is_left {
+            hasher.update(&sibling_hash);
+            hasher.update(&current_hash);
+        } else {
+            hasher.update(&current_hash);
+            hasher.update(&sibling_hash);
+        }
+        current_hash = hasher.finalize().into();
+    }
+
+    current_hash == root
+}
+
 pub trait SecureSigner {
     fn sign(&self, data: &[u8]) -> Signature;
     fn public_key(&self) -> VerifyingKey;
@@ -174,6 +268,20 @@ pub fn compute_authorship_fingerprint(authors: &[crate::models::AuthorMetadata])
         hasher.update(author.author_id.as_bytes());
         hasher.update(author.name.as_bytes());
         hasher.update(author.role.as_bytes());
+    }
+    hex::encode(hasher.finalize().as_bytes())
+}
+
+pub fn compute_authorship_fingerprint_v2(authors: &[crate::models::AuthorMetadata]) -> String {
+    let mut hasher = Hasher::new();
+    hasher.update(b"v2\x1f");
+    for author in authors {
+        hasher.update(author.author_id.as_bytes());
+        hasher.update(b"\x1f");
+        hasher.update(author.name.as_bytes());
+        hasher.update(b"\x1f");
+        hasher.update(author.role.as_bytes());
+        hasher.update(b"\x1e");
     }
     hex::encode(hasher.finalize().as_bytes())
 }

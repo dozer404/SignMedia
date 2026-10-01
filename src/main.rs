@@ -111,6 +111,66 @@ enum Commands {
         #[arg(short, long)]
         input: PathBuf,
     },
+    /// Sign a file and embed C2PA Content Credentials
+    C2paSign {
+        /// Input media file (JPEG/PNG/MP4)
+        #[arg(short, long)]
+        input: PathBuf,
+        /// Output file
+        #[arg(short, long)]
+        output: PathBuf,
+        /// Title
+        #[arg(short, long, default_value = "Untitled")]
+        title: String,
+        /// Author name
+        #[arg(short, long, default_value = "Default Author")]
+        author: String,
+        /// Optional path to signing certificate (PEM)
+        #[arg(long)]
+        cert: Option<PathBuf>,
+        /// Optional path to private key (PEM)
+        #[arg(long)]
+        key: Option<PathBuf>,
+    },
+    /// Verify C2PA Content Credentials in a file
+    C2paVerify {
+        /// Input file
+        #[arg(short, long)]
+        input: PathBuf,
+    },
+    /// Inspect C2PA manifest store and metadata
+    Inspect {
+        /// Input file
+        #[arg(short, long)]
+        input: PathBuf,
+    },
+    /// Pack playable media and C2PA manifest store into an archival package (.smed)
+    ArchivePack {
+        /// Input playable media file
+        #[arg(short, long)]
+        media: PathBuf,
+        /// Input C2PA manifest store file (or JSON)
+        #[arg(short, long)]
+        manifest: PathBuf,
+        /// Output .smed archival package file
+        #[arg(short, long)]
+        output: PathBuf,
+    },
+    /// Unpack an archival package (.smed)
+    ArchiveUnpack {
+        /// Input .smed archival package file
+        #[arg(short, long)]
+        input: PathBuf,
+        /// Output directory for extracted assets
+        #[arg(short, long)]
+        output_dir: PathBuf,
+    },
+    /// Verify inventory integrity of an archival package (.smed)
+    ArchiveVerify {
+        /// Input .smed archival package file
+        #[arg(short, long)]
+        input: PathBuf,
+    },
 }
 
 fn main() -> Result<()> {
@@ -187,6 +247,58 @@ fn main() -> Result<()> {
         }
         Commands::VerifyMetadata { input } => {
             verify_metadata_command(input)?;
+        }
+        Commands::C2paSign {
+            input,
+            output,
+            title,
+            author,
+            cert,
+            key,
+        } => {
+            signmedia::c2pa_backend::c2pa_sign_file(
+                &input,
+                &output,
+                &title,
+                &author,
+                cert.as_deref(),
+                key.as_deref(),
+            )?;
+            println!("C2PA Content Credentials signed and embedded into {:?}", output);
+        }
+        Commands::C2paVerify { input } => {
+            let json_report = signmedia::c2pa_backend::c2pa_verify_file(&input)?;
+            println!("{}", json_report);
+        }
+        Commands::Inspect { input } => {
+            let summary = signmedia::c2pa_backend::inspect_file(&input)?;
+            println!("{}", summary);
+        }
+        Commands::ArchivePack {
+            media,
+            manifest,
+            output,
+        } => {
+            let media_bytes = fs::read(&media)?;
+            let manifest_bytes = fs::read(&manifest)?;
+            let media_name = media.file_name().and_then(|n| n.to_str()).unwrap_or("media.bin");
+            let pkg = signmedia::archive::ArchivalPackage::new(&media_bytes, media_name, &manifest_bytes);
+            pkg.pack_to_file(&output)?;
+            println!("Archival package packed to {:?}", output);
+        }
+        Commands::ArchiveUnpack { input, output_dir } => {
+            let pkg = signmedia::archive::ArchivalPackage::unpack_from_file(&input)?;
+            fs::create_dir_all(&output_dir)?;
+            let media_out = output_dir.join(&pkg.inventory.playable_media_name);
+            let manifest_out = output_dir.join("manifest_store.c2pa");
+            fs::write(&media_out, &pkg.playable_media_bytes)?;
+            fs::write(&manifest_out, &pkg.manifest_store_bytes)?;
+            println!("Unpacked archival package into {:?}", output_dir);
+        }
+        Commands::ArchiveVerify { input } => {
+            let pkg = signmedia::archive::ArchivalPackage::unpack_from_file(&input)?;
+            pkg.verify_inventory()?;
+            println!("Archival package inventory integrity verified successfully.");
         }
     }
 

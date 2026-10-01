@@ -1,7 +1,14 @@
+pub mod archive;
+pub mod c2pa_backend;
+pub mod capture;
 pub mod codec;
 pub mod container;
 pub mod crypto;
+pub mod experiments;
+pub mod fingerprint;
 pub mod models;
+pub mod provenance;
 pub mod timecode;
+pub mod trust;
 pub mod wasm;
 pub mod zk;

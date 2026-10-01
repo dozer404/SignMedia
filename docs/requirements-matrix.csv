@@ -1,0 +1,51 @@
+requirement_id,issue,phase,requirement,status,implementation_paths,validation_command_or_test,evidence,blocker
+SM-22-T01,#22,0,Write SPEC.md for SMED v1 and v2,validated,SPEC.md,cargo test --test legacy_format_tests,SPEC.md created,none
+SM-22-T02,#22,0,Describe exact OWD/DWD JSON schemas and Ed25519 inputs,validated,SPEC.md,cargo test --test legacy_format_tests,SPEC.md created,none
+SM-22-T03,#22,0,Specify legacy leaf hashes and Merkle proof behavior,validated,SPEC.md,cargo test --test legacy_format_tests,SPEC.md created,none
+SM-22-T04,#22,0,Correct README examples and claims,validated,README.md,cargo test,README.md updated,none
+SM-22-A01,#22,0,Independent parser decodes legacy v1/v2 fixtures,validated,tests/legacy_format_tests.rs,cargo test --test legacy_format_tests,Tests passing,none
+SM-22-A02,#22,0,Golden fixtures include exact signature inputs and tables,validated,tests/fixtures/legacy/,cargo test --test legacy_format_tests,Fixtures created,none
+SM-23-T01,#23,1,Add src/provenance/ with Asset Claim Assertion etc,validated,src/provenance/,cargo test --test provenance_validation_tests,Types created,none
+SM-23-T02,#23,1,Move signature and policy validation out of main,validated,src/provenance/validation.rs,cargo test --test provenance_validation_tests,Validation extracted,none
+SM-23-T03,#23,1,Implement legacy OWD/DWD adapters,validated,src/provenance/adapters.rs,cargo test --test provenance_validation_tests,Adapters created,none
+SM-23-T04,#23,1,Replace wasm verify_original_signature check,validated,src/wasm.rs,cargo test --test provenance_validation_tests,WASM updated,none
+SM-23-A01,#23,1,Legacy original and derivative fixtures retain signatures,validated,tests/provenance_validation_tests.rs,cargo test --test provenance_validation_tests,Tests passing,none
+SM-24-T01,#24,9,Define CaptureClaim AuthorshipClaim EditClaim PublicationClaim,validated,src/provenance/claims.rs,cargo test --test claim_semantics_tests,Claims defined,none
+SM-24-T02,#24,9,Separate cryptographic key identity from human display names,validated,src/provenance/claims.rs,cargo test --test claim_semantics_tests,Identity separated,none
+SM-24-T03,#24,9,Version authorship fingerprint encoding with explicit field boundaries,validated,src/crypto.rs,cargo test --test claim_semantics_tests,Fingerprint v2 created,none
+SM-24-A01,#24,9,Asset can carry different capture author editor publisher actors,validated,tests/claim_semantics_tests.rs,cargo test --test claim_semantics_tests,Tests passing,none
+SM-24-A02,#24,9,Field boundary collisions no longer share a fingerprint,validated,tests/claim_semantics_tests.rs,cargo test --test claim_semantics_tests,Tests passing,none
+SM-25-T01,#25,11,Specify new tree profile with domain separation,validated,docs/merkle-profile.md,cargo test --test merkle_profile_tests,Profile created,none
+SM-25-T02,#25,11,Implement MerkleTreeV2 and verify_proof_v2 with checked hash decoding,validated,src/crypto.rs,cargo test --test merkle_profile_tests,Tree v2 implemented,none
+SM-25-A01,#25,11,Truncated or malformed proof hashes are rejected,validated,tests/merkle_profile_tests.rs,cargo test --test merkle_profile_tests,Tests passing,none
+SM-26-T01,#26,2,Add c2pa crate dependency and backend module,validated,src/c2pa_backend/,cargo test --test c2pa_interop_tests,C2PA SDK integrated,none
+SM-26-T02,#26,2,Implement c2pa-sign c2pa-verify and inspect commands,validated,src/main.rs,cargo test --test c2pa_interop_tests,Commands added,none
+SM-26-A01,#26,2,Signed JPEG outputs validate in C2PA Reader,validated,tests/c2pa_interop_tests.rs,cargo test --test c2pa_interop_tests,Tests passing,none
+SM-27-T01,#27,5,Create src/trust/ and TrustAnchorConfig,validated,src/trust/,cargo test --test trust_policy_tests,Module created,none
+SM-27-T02,#27,5,Support VerificationPolicy LegacyV0 and ConfigurableV2,validated,src/trust/policy.rs,cargo test --test trust_policy_tests,Policy implemented,none
+SM-27-A01,#27,5,Configurable policy supports optional notary co-signing,validated,tests/trust_policy_tests.rs,cargo test --test trust_policy_tests,Tests passing,none
+SM-28-T01,#28,3,Map OWD and DWD into C2PA Builder manifests,validated,src/c2pa_backend/mapping.rs,cargo test --test c2pa_lineage_tests,Mapping implemented,none
+SM-28-A01,#28,3,Original and derivative assets generate valid C2PA manifests,validated,tests/c2pa_lineage_tests.rs,cargo test --test c2pa_lineage_tests,Tests passing,none
+SM-29-T01,#29,4,Define org.signmedia.chunk-lineage.v1 custom assertion and schema,validated,docs/assertions/chunk-lineage-v1.md,cargo test --test chunk_lineage_tests,Assertion defined,none
+SM-29-T02,#29,4,Implement assertion creation and verification,validated,src/c2pa_backend/chunk_lineage.rs,cargo test --test chunk_lineage_tests,Assertion implemented,none
+SM-29-A01,#29,4,Chunk lineage assertion validates against parent root,validated,tests/chunk_lineage_tests.rs,cargo test --test chunk_lineage_tests,Tests passing,none
+SM-30-T01,#30,6,Implement RFC 3161 timestamp token imprint verification,validated,src/provenance/timestamp.rs,cargo test --test timestamp_tests,Timestamp verified,none
+SM-30-T02,#30,6,Specify capture time interval bounds protocol,validated,docs/capture-bounds.md,cargo test --test timestamp_tests,Protocol documented,none
+SM-30-A01,#30,6,Required timestamp mode fails when evidence is absent or tampered,validated,tests/timestamp_tests.rs,cargo test --test timestamp_tests,Tests passing,none
+SM-31-T01,#31,7,Create src/trust/status.rs and EvidenceStatus,validated,src/trust/status.rs,cargo test --test revocation_tests,Status created,none
+SM-31-T02,#31,7,Document revocation policy and transparency log design,validated,docs/revocation-policy.md,cargo test --test revocation_tests,Docs written,none
+SM-31-A01,#31,7,Historical signatures prior to revocation remain valid,validated,tests/revocation_tests.rs,cargo test --test revocation_tests,Tests passing,none
+SM-32-T01,#32,10,Implement decoded visual fingerprinting with img_hash,validated,src/fingerprint/visual.rs,cargo test --test fingerprint_tests,Fingerprint implemented,none
+SM-32-T02,#32,10,Document false match analysis and thresholds,validated,docs/fingerprint-evaluation.md,cargo test --test fingerprint_tests,Evaluation documented,none
+SM-32-A01,#32,10,Resized/recompressed version of image matches fingerprint within distance threshold,validated,tests/fingerprint_tests.rs,cargo test --test fingerprint_tests,Tests passing,none
+SM-33-T01,#33,13,Create ArchivalPackage and inventory structure,validated,src/archive/package.rs,cargo test --test archive_roundtrip_tests,Archival package implemented,none
+SM-33-T02,#33,13,Add archive pack unpack and verify commands,validated,src/main.rs,cargo test --test archive_roundtrip_tests,Archive commands added,none
+SM-33-A01,#33,13,Pack unpack returns byte-identical archived media and manifest store,validated,tests/archive_roundtrip_tests.rs,cargo test --test archive_roundtrip_tests,Tests passing,none
+SM-34-T01,#34,8,Create CaptureAttestor trait and SoftwareKeyAttestor,experimental_prototype,src/capture/attestation.rs,cargo test --test capture_attestation_tests,Trait created,none
+SM-34-T02,#34,8,Implement SimulatedHardwareAttestor and document backend matrix,experimental_prototype,docs/experiments/capture-attestation.md,cargo test --test capture_attestation_tests,Hardware prototype created,none
+SM-34-A01,#34,8,Software and simulated hardware attestations verify successfully,experimental_prototype,tests/capture_attestation_tests.rs,cargo test --test capture_attestation_tests,Tests passing,none
+SM-35-T01,#35,12,Create PqArchivalReceipt and ML-DSA-65 commitment verification,experimental_simulated,src/experiments/pq.rs,cargo test --test pq_receipt_tests,PQ receipt created,none
+SM-35-T02,#35,12,Document PQ archival commitment and threat model,experimental_simulated,docs/experiments/pq-archival.md,cargo test --test pq_receipt_tests,Docs written,none
+SM-35-A01,#35,12,ML-DSA-65 commitment verification succeeds for valid store,experimental_simulated,tests/pq_receipt_tests.rs,cargo test --test pq_receipt_tests,Tests passing,none
+SM-36-T01,#36,14,Create conformance test suite and docs/conformance-readiness.md,validated,docs/conformance-readiness.md,cargo test --test conformance_suite_tests,Conformance docs created,none
+SM-36-A01,#36,14,End-to-end conformance pipeline test validates generation and verification,validated,tests/conformance_suite_tests.rs,cargo test --test conformance_suite_tests,Tests passing,none

@@ -25,3 +25,8 @@ ark-std = "0.5.0"
 ark-ff = "0.5.0"
 ark-snark = "0.5.1"
 dotenvy = "0.15.7"
+c2pa = { version = "0.36", features = ["file_io", "unstable_api"] }
+tempfile = "3.8"
+
+[dev-dependencies]
+image = "0.23"

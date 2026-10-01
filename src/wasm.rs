@@ -1,5 +1,6 @@
 use crate::container::StreamingVerifier;
 use crate::models::SignedManifest;
+use crate::provenance::{validate_signed_manifest, IntegrityStatus};
 use wasm_bindgen::prelude::*;
 
 #[wasm_bindgen]
@@ -30,6 +31,6 @@ pub fn verify_original_signature(manifest_json: &str) -> bool {
         Err(_) => return false,
     };
 
-    // Simplistic check for v1 WASM export
-    !manifest.signatures.is_empty()
+    let report = validate_signed_manifest(&manifest);
+    report.content_integrity == IntegrityStatus::Verified
 }
