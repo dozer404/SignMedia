@@ -24,44 +24,73 @@ pub fn validate_signed_manifest(manifest: &SignedManifest) -> ValidationReport {
     };
 
     let content_hash = hash_data(&content_json);
-    let mut valid_sig_found = false;
+    let mut all_sigs_valid = true;
+    let mut verified_keys = Vec::new();
 
     for sig_entry in &manifest.signatures {
         let pub_key_bytes = match hex::decode(&sig_entry.public_key) {
             Ok(bytes) => bytes,
-            Err(_) => continue,
+            Err(_) => {
+                all_sigs_valid = false;
+                report.details.push(format!("Malformed public key hex: {}", sig_entry.public_key));
+                continue;
+            }
         };
 
         let verifying_key = match pub_key_bytes.as_slice().try_into().map(VerifyingKey::from_bytes) {
             Ok(Ok(vk)) => vk,
-            _ => continue,
+            _ => {
+                all_sigs_valid = false;
+                report.details.push("Invalid verifying key size or format".to_string());
+                continue;
+            }
         };
 
         let sig_bytes = match hex::decode(&sig_entry.signature) {
             Ok(bytes) => bytes,
-            Err(_) => continue,
+            Err(_) => {
+                all_sigs_valid = false;
+                report.details.push("Malformed signature hex".to_string());
+                continue;
+            }
         };
 
         let signature = match sig_bytes.as_slice().try_into().map(ed25519_dalek::Signature::from_bytes) {
             Ok(sig) => sig,
-            Err(_) => continue,
+            _ => {
+                all_sigs_valid = false;
+                report.details.push("Invalid signature size or format".to_string());
+                continue;
+            }
         };
 
         if verify_signature(&content_hash, &signature, &verifying_key) {
-            valid_sig_found = true;
-            break;
+            verified_keys.push(sig_entry.public_key.clone());
+        } else {
+            all_sigs_valid = false;
+            report.details.push(format!("Signature verification failed for key {}", sig_entry.public_key));
         }
     }
 
-    if valid_sig_found {
+    if all_sigs_valid && !verified_keys.is_empty() {
         report.content_integrity = IntegrityStatus::Verified;
-        report.signer_trust = TrustStatus::Trusted; // Default local trust for valid legacy keys
-        report.timestamp_status = TimestampStatus::Valid;
-        report.lineage_status = LineageStatus::Complete;
+        report.signer_trust = TrustStatus::Trusted;
+        report.timestamp_status = TimestampStatus::Absent;
+        report.lineage_status = match &manifest.content {
+            crate::models::ManifestContent::Original(_) => LineageStatus::Complete,
+            crate::models::ManifestContent::Derivative(dwd) => {
+                if dwd.clip_mappings.is_empty() {
+                    LineageStatus::Incomplete
+                } else {
+                    LineageStatus::Complete
+                }
+            }
+        };
     } else {
         report.content_integrity = IntegrityStatus::Invalid;
         report.signer_trust = TrustStatus::Untrusted;
-        report.details.push("Cryptographic signature verification failed".to_string());
+        report.timestamp_status = TimestampStatus::Absent;
+        report.lineage_status = LineageStatus::Broken;
     }
 
     report

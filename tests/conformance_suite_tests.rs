@@ -10,7 +10,9 @@ fn test_conformance_full_pipeline_check() -> anyhow::Result<()> {
     let img: ImageBuffer<Rgb<u8>, Vec<u8>> = ImageBuffer::new(32, 32);
     img.save(&input_jpg)?;
 
-    c2pa_sign_file(&input_jpg, &signed_jpg, "Conformance Asset", "SignMedia Test Suite", None, None)?;
+    let cert_path = std::path::Path::new("tests/fixtures/test_cert.pem");
+    let key_path = std::path::Path::new("tests/fixtures/test_key.pem");
+    c2pa_sign_file(&input_jpg, &signed_jpg, "Conformance Asset", "SignMedia Test Suite", Some(cert_path), Some(key_path))?;
 
     let report = c2pa_verify_file(&signed_jpg)?;
     assert!(report.contains("c2pa.actions"));

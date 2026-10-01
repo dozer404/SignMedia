@@ -44,10 +44,12 @@ impl CaptureAttestor for SoftwareKeyAttestor {
     }
 
     fn attest(&self, media_data: &[u8], challenge_nonce: &str) -> Result<AttestationStatement> {
-        let media_hash = hash_data(media_data);
-        let mut commitment = Vec::new();
-        commitment.extend_from_slice(&media_hash);
-        commitment.extend_from_slice(challenge_nonce.as_bytes());
+        let commitment = compute_attestation_commitment(
+            media_data,
+            challenge_nonce,
+            &self.device_id,
+            self.assurance_level(),
+        );
 
         let sig = self.signing_key.sign(&commitment);
         let pub_key_hex = hex::encode(self.signing_key.verifying_key().to_bytes());
@@ -82,10 +84,12 @@ impl CaptureAttestor for SimulatedHardwareAttestor {
     }
 
     fn attest(&self, media_data: &[u8], challenge_nonce: &str) -> Result<AttestationStatement> {
-        let media_hash = hash_data(media_data);
-        let mut commitment = Vec::new();
-        commitment.extend_from_slice(&media_hash);
-        commitment.extend_from_slice(challenge_nonce.as_bytes());
+        let commitment = compute_attestation_commitment(
+            media_data,
+            challenge_nonce,
+            &self.device_id,
+            self.assurance_level(),
+        );
 
         let sig = self.signing_key.sign(&commitment);
         let pub_key_hex = hex::encode(self.signing_key.verifying_key().to_bytes());
@@ -100,14 +104,39 @@ impl CaptureAttestor for SimulatedHardwareAttestor {
     }
 }
 
+pub fn compute_attestation_commitment(
+    media_data: &[u8],
+    challenge_nonce: &str,
+    device_id: &str,
+    assurance_level: AssuranceLevel,
+) -> Vec<u8> {
+    let media_hash = hash_data(media_data);
+    let mut commitment = Vec::new();
+    commitment.extend_from_slice(b"SignMedia-Attestation-v1\x00");
+    commitment.extend_from_slice(&media_hash);
+    commitment.extend_from_slice(&(challenge_nonce.len() as u64).to_le_bytes());
+    commitment.extend_from_slice(challenge_nonce.as_bytes());
+    commitment.extend_from_slice(&(device_id.len() as u64).to_le_bytes());
+    commitment.extend_from_slice(device_id.as_bytes());
+    let level_byte = match assurance_level {
+        AssuranceLevel::SoftwareKey => 0u8,
+        AssuranceLevel::HardwareKey => 1u8,
+        AssuranceLevel::AttestedPipeline => 2u8,
+    };
+    commitment.push(level_byte);
+    commitment
+}
+
 pub fn verify_attestation_statement(
     statement: &AttestationStatement,
     media_data: &[u8],
 ) -> Result<bool> {
-    let media_hash = hash_data(media_data);
-    let mut commitment = Vec::new();
-    commitment.extend_from_slice(&media_hash);
-    commitment.extend_from_slice(statement.challenge_nonce.as_bytes());
+    let commitment = compute_attestation_commitment(
+        media_data,
+        &statement.challenge_nonce,
+        &statement.device_id,
+        statement.assurance_level,
+    );
 
     let pub_key_bytes = hex::decode(&statement.public_key)?;
     let verifying_key = ed25519_dalek::VerifyingKey::from_bytes(

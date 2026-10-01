@@ -44,6 +44,11 @@ impl PqArchivalReceipt {
             return Ok(false);
         }
 
+        let expected_store_hash = hex::encode(hash_data(manifest_store_bytes));
+        if self.manifest_store_hash != expected_store_hash {
+            return Ok(false);
+        }
+
         let expected_commitment = Self::compute_commitment(manifest_store_bytes);
         if hex::encode(expected_commitment) != self.commitment_hash {
             return Ok(false);

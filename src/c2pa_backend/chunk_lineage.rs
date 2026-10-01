@@ -27,12 +27,23 @@ pub fn add_chunk_lineage_assertion(
 pub fn verify_chunk_lineage_assertion(
     assertion: &ChunkLineageAssertion,
 ) -> Result<bool> {
+    if assertion.start_chunk_index > assertion.end_chunk_index {
+        return Ok(false);
+    }
+
+    if assertion.start_chunk_index < assertion.end_chunk_index && assertion.proofs.is_empty() {
+        return Ok(false);
+    }
+
     let root_bytes = hex::decode(&assertion.merkle_root)?;
     let root: Hash = root_bytes
         .try_into()
         .map_err(|_| anyhow!("Invalid Merkle root length"))?;
 
     for proof in &assertion.proofs {
+        if proof.chunk_index < assertion.start_chunk_index || proof.chunk_index >= assertion.end_chunk_index {
+            return Ok(false);
+        }
         if !verify_proof(root, proof) {
             return Ok(false);
         }

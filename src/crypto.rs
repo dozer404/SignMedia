@@ -274,14 +274,20 @@ pub fn compute_authorship_fingerprint(authors: &[crate::models::AuthorMetadata])
 
 pub fn compute_authorship_fingerprint_v2(authors: &[crate::models::AuthorMetadata]) -> String {
     let mut hasher = Hasher::new();
-    hasher.update(b"v2\x1f");
+    hasher.update(b"SignMedia-Authorship-v2\x00");
+    hasher.update(&(authors.len() as u64).to_le_bytes());
     for author in authors {
-        hasher.update(author.author_id.as_bytes());
-        hasher.update(b"\x1f");
-        hasher.update(author.name.as_bytes());
-        hasher.update(b"\x1f");
-        hasher.update(author.role.as_bytes());
-        hasher.update(b"\x1e");
+        let id_bytes = author.author_id.as_bytes();
+        hasher.update(&(id_bytes.len() as u64).to_le_bytes());
+        hasher.update(id_bytes);
+
+        let name_bytes = author.name.as_bytes();
+        hasher.update(&(name_bytes.len() as u64).to_le_bytes());
+        hasher.update(name_bytes);
+
+        let role_bytes = author.role.as_bytes();
+        hasher.update(&(role_bytes.len() as u64).to_le_bytes());
+        hasher.update(role_bytes);
     }
     hex::encode(hasher.finalize().as_bytes())
 }

@@ -37,6 +37,8 @@ pub const SECTION_TYPE_TRACK_TABLE: u32 = 3;
 pub const SECTION_TYPE_INDEX_DATA: u32 = 4;
 pub const SECTION_TYPE_EXTRA_METADATA: u32 = 5;
 
+pub const MAX_SECTION_LENGTH: u64 = 100 * 1024 * 1024; // 100 MB max allowed section
+
 #[derive(Debug, Clone)]
 pub struct TrackTableEntry {
     pub track_id: u32,
@@ -60,17 +62,36 @@ pub struct SectionHeader {
 
 impl SectionHeader {
     pub fn read<R: Read>(reader: &mut R) -> Result<Option<Self>> {
-        match reader.read_u32::<LittleEndian>() {
-            Ok(section_type) => {
-                let length = reader.read_u64::<LittleEndian>()?;
-                Ok(Some(Self {
-                    section_type,
-                    length,
-                }))
+        let mut buf = [0u8; 4];
+        let mut bytes_read = 0;
+        while bytes_read < 4 {
+            match reader.read(&mut buf[bytes_read..]) {
+                Ok(0) => break,
+                Ok(n) => bytes_read += n,
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(e) => return Err(e.into()),
             }
-            Err(err) if err.kind() == std::io::ErrorKind::UnexpectedEof => Ok(None),
-            Err(err) => Err(err.into()),
         }
+
+        if bytes_read == 0 {
+            return Ok(None); // Clean EOF
+        }
+        if bytes_read < 4 {
+            return Err(anyhow!("Truncated section header type (read {}/4 bytes)", bytes_read));
+        }
+
+        let section_type = u32::from_le_bytes(buf);
+        let length = reader.read_u64::<LittleEndian>()
+            .map_err(|_| anyhow!("Truncated section header length for section type {}", section_type))?;
+
+        if length > MAX_SECTION_LENGTH {
+            return Err(anyhow!("Section length {} exceeds maximum allowed limit", length));
+        }
+
+        Ok(Some(Self {
+            section_type,
+            length,
+        }))
     }
 
     pub fn write<W: Write>(&self, writer: &mut W) -> Result<()> {
@@ -427,23 +448,22 @@ pub struct StreamingVerifier {
 
 impl StreamingVerifier {
     pub fn new(manifest: SignedManifest) -> Result<Self> {
-        let original_root = match &manifest.content {
-            ManifestContent::Original(owd) => {
-                let root_bytes = hex::decode(&owd.tracks[0].merkle_root)?;
-                Some(
-                    root_bytes
-                        .try_into()
-                        .map_err(|_| anyhow!("Invalid root size"))?,
-                )
-            }
-            ManifestContent::Derivative(dwd) => {
-                let root_bytes = hex::decode(&dwd.original_owd.tracks[0].merkle_root)?;
-                Some(
-                    root_bytes
-                        .try_into()
-                        .map_err(|_| anyhow!("Invalid root size"))?,
-                )
-            }
+        let tracks = match &manifest.content {
+            ManifestContent::Original(owd) => &owd.tracks,
+            ManifestContent::Derivative(dwd) => &dwd.original_owd.tracks,
+        };
+
+        if tracks.is_empty() {
+            return Err(anyhow!("Manifest has no tracks for streaming verification"));
+        }
+
+        let original_root = {
+            let root_bytes = hex::decode(&tracks[0].merkle_root)?;
+            Some(
+                root_bytes
+                    .try_into()
+                    .map_err(|_| anyhow!("Invalid root size"))?,
+            )
         };
 
         Ok(Self {
@@ -456,14 +476,16 @@ impl StreamingVerifier {
         let actual_hash = crypto::hash_data(data);
 
         match &self.manifest.content {
-            ManifestContent::Original(_) => {
-                // In a real streaming scenario, we might need more than the root.
-                // But if we have the full Merkle tree nodes, we could verify.
-                // For this POC, we'll just check if the hash matches what we'd expect
-                // if we had the proofs. Since we don't store ALL hashes in manifest,
-                // we can't easily verify individual chunks without the tree or a proof.
-                // However, for Derivatives, we HAVE the proofs.
-                true // Placeholder for Original
+            ManifestContent::Original(owd) => {
+                if owd.tracks.is_empty() {
+                    return false;
+                }
+                if let Some(root) = self.original_root {
+                    if owd.tracks[0].total_chunks == 1 {
+                        return actual_hash == root;
+                    }
+                }
+                false
             }
             ManifestContent::Derivative(dwd) => {
                 for mapping in &dwd.clip_mappings {
@@ -514,7 +536,7 @@ mod tests {
                     channel_count: None,
                     timebase_num: None,
                     timebase_den: None,
-                    merkle_root: hex::encode([0u8; 32]),
+                    merkle_root: hex::encode(crypto::hash_data(b"hello")),
                     perceptual_hash: None,
                     total_chunks: 1,
                     chunk_size: 5,
@@ -591,6 +613,27 @@ mod tests {
         assert_eq!(c2, b"world");
 
         Ok(())
+    }
+
+    #[test]
+    fn test_truncated_section_header() {
+        let mut truncated_data = Vec::new();
+        truncated_data.extend_from_slice(MAGIC);
+        truncated_data.write_u32::<LittleEndian>(VERSION_V2).unwrap();
+        truncated_data.extend_from_slice(&[1, 0]); // 2 bytes instead of 4 for section type
+        let reader = SmedReader::new(Cursor::new(truncated_data));
+        assert!(reader.is_err());
+    }
+
+    #[test]
+    fn test_oversized_section_length() {
+        let mut oversized_data = Vec::new();
+        oversized_data.extend_from_slice(MAGIC);
+        oversized_data.write_u32::<LittleEndian>(VERSION_V2).unwrap();
+        oversized_data.write_u32::<LittleEndian>(SECTION_TYPE_MANIFEST).unwrap();
+        oversized_data.write_u64::<LittleEndian>(MAX_SECTION_LENGTH + 1).unwrap();
+        let reader = SmedReader::new(Cursor::new(oversized_data));
+        assert!(reader.is_err());
     }
 
     #[test]

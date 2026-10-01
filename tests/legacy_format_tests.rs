@@ -1,11 +1,11 @@
-use signmedia::container::{ChunkTableEntry, SectionHeader, SmedReader, SmedWriter, TrackTableEntry, MAGIC, SECTION_TYPE_MANIFEST, VERSION_V1, VERSION_V2};
-use signmedia::crypto::{compute_authorship_fingerprint, hash_data, sign, generate_keypair};
+use signmedia::container::{SectionHeader, SmedReader, MAGIC, SECTION_TYPE_MANIFEST, VERSION_V1, VERSION_V2};
+use signmedia::crypto::{compute_authorship_fingerprint, generate_keypair, hash_data, sign};
 use signmedia::models::{
     AuthorMetadata, ManifestContent, OriginalWorkDescriptor, SignatureEntry, SignedManifest,
-    TrackChunkIndexEntry, TrackMetadata,
+    TrackMetadata,
 };
 use chrono::Utc;
-use std::io::{Cursor, Read, Write};
+use std::io::{Cursor, Write};
 
 #[test]
 fn test_legacy_v1_fixture_decode() -> anyhow::Result<()> {
