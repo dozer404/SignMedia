@@ -71,4 +71,21 @@ fn test_fingerprint_v2_field_boundaries() {
         compute_authorship_fingerprint_v2(&author_a),
         compute_authorship_fingerprint_v2(&author_b)
     );
+
+    // Test delimiter collision in name/role fields (R10)
+    let author_delim1 = vec![AuthorMetadata {
+        author_id: "key_1".to_string(),
+        name: "a\x1fb".to_string(),
+        role: "c".to_string(),
+    }];
+    let author_delim2 = vec![AuthorMetadata {
+        author_id: "key_1".to_string(),
+        name: "a".to_string(),
+        role: "b\x1fc".to_string(),
+    }];
+
+    assert_ne!(
+        compute_authorship_fingerprint_v2(&author_delim1),
+        compute_authorship_fingerprint_v2(&author_delim2)
+    );
 }

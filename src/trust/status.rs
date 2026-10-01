@@ -22,7 +22,7 @@ pub fn evaluate_historical_status(
     revocation_record: Option<&RevocationRecord>,
 ) -> EvidenceStatus {
     match revocation_record {
-        None => EvidenceStatus::Good,
+        None => EvidenceStatus::Unknown,
         Some(record) => {
             if signature_time < record.revoked_at {
                 EvidenceStatus::Good

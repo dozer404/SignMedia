@@ -147,13 +147,13 @@ enum Commands {
     /// Pack playable media and C2PA manifest store into an archival package (.smed)
     ArchivePack {
         /// Input playable media file
-        #[arg(short, long)]
+        #[arg(short = 'm', long = "media")]
         media: PathBuf,
         /// Input C2PA manifest store file (or JSON)
-        #[arg(short, long)]
+        #[arg(short = 'f', long = "manifest")]
         manifest: PathBuf,
         /// Output .smed archival package file
-        #[arg(short, long)]
+        #[arg(short = 'o', long = "output")]
         output: PathBuf,
     },
     /// Unpack an archival package (.smed)
@@ -282,17 +282,13 @@ fn main() -> Result<()> {
             let media_bytes = fs::read(&media)?;
             let manifest_bytes = fs::read(&manifest)?;
             let media_name = media.file_name().and_then(|n| n.to_str()).unwrap_or("media.bin");
-            let pkg = signmedia::archive::ArchivalPackage::new(&media_bytes, media_name, &manifest_bytes);
+            let pkg = signmedia::archive::ArchivalPackage::new(&media_bytes, media_name, &manifest_bytes)?;
             pkg.pack_to_file(&output)?;
             println!("Archival package packed to {:?}", output);
         }
         Commands::ArchiveUnpack { input, output_dir } => {
             let pkg = signmedia::archive::ArchivalPackage::unpack_from_file(&input)?;
-            fs::create_dir_all(&output_dir)?;
-            let media_out = output_dir.join(&pkg.inventory.playable_media_name);
-            let manifest_out = output_dir.join("manifest_store.c2pa");
-            fs::write(&media_out, &pkg.playable_media_bytes)?;
-            fs::write(&manifest_out, &pkg.manifest_store_bytes)?;
+            pkg.unpack_and_extract(&output_dir)?;
             println!("Unpacked archival package into {:?}", output_dir);
         }
         Commands::ArchiveVerify { input } => {

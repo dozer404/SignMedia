@@ -164,6 +164,12 @@ Commands:
   extract          Extract tracks from a .smed file into a container (MP4/MKV/WEBM)
   verify-smed      Show information and verify cryptographic integrity of a .smed file
   verify-metadata  Verify embedded SignMedia metadata in an extracted container
+  c2pa-sign        Sign a file and embed C2PA Content Credentials
+  c2pa-verify      Verify C2PA Content Credentials in a file
+  inspect          Inspect C2PA manifest store and metadata
+  archive-pack     Pack playable media and C2PA manifest store into an archival package (.smed)
+  archive-unpack   Unpack an archival package (.smed)
+  archive-verify   Verify inventory integrity of an archival package (.smed)
   help             Print this message or the help of the given subcommand(s)
 
 Options:

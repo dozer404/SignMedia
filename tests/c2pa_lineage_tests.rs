@@ -18,7 +18,7 @@ fn test_c2pa_mapping_owd_dwd() -> anyhow::Result<()> {
         tracks: vec![],
     };
 
-    let builder_owd = build_c2pa_manifest_for_owd(&owd)?;
+    let _builder_owd = build_c2pa_manifest_for_owd(&owd)?;
 
     let dwd = DerivativeWorkDescriptor {
         derivative_id: Uuid::new_v4(),
@@ -31,7 +31,7 @@ fn test_c2pa_mapping_owd_dwd() -> anyhow::Result<()> {
         clip_mappings: vec![],
     };
 
-    let builder_dwd = build_c2pa_manifest_for_dwd(&dwd, None)?;
+    let _builder_dwd = build_c2pa_manifest_for_dwd(&dwd, None)?;
 
     Ok(())
 }

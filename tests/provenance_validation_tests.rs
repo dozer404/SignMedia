@@ -1,7 +1,6 @@
 use signmedia::crypto::{generate_keypair, hash_data, sign};
 use signmedia::models::{
     AuthorMetadata, ManifestContent, OriginalWorkDescriptor, SignatureEntry, SignedManifest,
-    TrackMetadata,
 };
 use signmedia::provenance::{validate_signed_manifest, IntegrityStatus};
 use chrono::Utc;
@@ -40,6 +39,16 @@ fn test_provenance_validation_valid_and_invalid() -> anyhow::Result<()> {
 
     let report = validate_signed_manifest(&manifest);
     assert_eq!(report.content_integrity, IntegrityStatus::Verified);
+
+    // One valid signature plus a malformed second signature must fail verification
+    let mut manifest_with_malformed_second_sig = manifest.clone();
+    manifest_with_malformed_second_sig.signatures.push(SignatureEntry {
+        signature: "invalid_hex_signature".to_string(),
+        public_key: hex::encode([1u8; 32]),
+        display_name: Some("Bob".to_string()),
+    });
+    let report2 = validate_signed_manifest(&manifest_with_malformed_second_sig);
+    assert_eq!(report2.content_integrity, IntegrityStatus::Invalid);
 
     // Tamper signature
     manifest.signatures[0].signature = hex::encode([0u8; 64]);

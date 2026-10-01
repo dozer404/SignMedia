@@ -28,9 +28,9 @@ fn test_historical_revocation_evaluation() {
         EvidenceStatus::Revoked
     );
 
-    // No revocation record is good
+    // No revocation record is unknown / unavailable (absence of evidence != good status)
     assert_eq!(
         evaluate_historical_status(future_sig_time, None),
-        EvidenceStatus::Good
+        EvidenceStatus::Unknown
     );
 }
